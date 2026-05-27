@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    rules:
+      # Expose NATS consumer pending messages as a per-pod custom metric.
+      # The HPA uses this to scale the executor deployment.
+      - seriesQuery: 'gnatsd_varz_remq_msgs{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace: { resource: namespace }
+            pod:       { resource: pod }
+        name:
+          matches: "gnatsd_varz_remq_msgs"
+          as: "nats_consumer_pending_msgs"
+        metricsQuery: 'sum(gnatsd_varz_remq_msgs{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+      # Fallback: use the artifex messages processed rate as a proxy for queue depth
+      - seriesQuery: 'artifex_messages_processed_total{namespace!="",pod!=""}'
+        resources:
+          overrides:
+            namespace: { resource: namespace }
+            pod:       { resource: pod }
+        name:
+          matches: "artifex_messages_processed_total"
+          as: "artifex_executor_queue_depth"
+        metricsQuery: 'rate(artifex_messages_processed_total{<<.LabelMatchers>>}[2m])'

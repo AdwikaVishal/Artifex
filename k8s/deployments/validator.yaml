@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: validator
+  namespace: artifex
+  labels:
+    app: validator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: validator
+  template:
+    metadata:
+      labels:
+        app: validator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9094"
+    spec:
+      containers:
+        - name: validator
+          image: artifex/validator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9094
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: artifex-config
+            - secretRef:
+                name: artifex-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9094
+            initialDelaySeconds: 15
+            periodSeconds: 30

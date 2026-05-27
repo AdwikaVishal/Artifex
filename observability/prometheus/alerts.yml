@@ -1,0 +1,57 @@
+groups:
+  - name: agent_health
+    rules:
+      - alert: AgentDown
+        expr: up{job="artifex-agents"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent {{ $labels.instance }} is down"
+          description: "No metrics received from {{ $labels.instance }} for more than 1 minute."
+
+      - alert: AgentHeartbeatStale
+        expr: (time() - artifex_last_heartbeat_timestamp) > 90
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent {{ $labels.agent }} heartbeat is stale"
+          description: "Agent {{ $labels.agent }} last heartbeat was {{ $value | humanizeDuration }} ago."
+
+      - alert: HighErrorRate
+        expr: >
+          sum(rate(artifex_messages_failed_total[5m])) by (agent)
+          /
+          (sum(rate(artifex_messages_processed_total[5m])) by (agent) + 0.001)
+          > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate on agent {{ $labels.agent }}"
+          description: "Agent {{ $labels.agent }} error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+  - name: foster_care
+    rules:
+      - alert: HighRiskPlacementAlert
+        expr: >
+          sum(rate(artifex_messages_processed_total{subject="foster.alerts"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High-risk foster placement alert fired"
+          description: "A placement disruption alert passed consortium validation and was sent to caseworkers."
+
+      - alert: APIHighLatency
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(artifex_api_latency_seconds_bucket[5m])) by (le, endpoint)
+          ) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API endpoint {{ $labels.endpoint }} p99 latency > 5s"
+          description: "p99 latency for {{ $labels.endpoint }} is {{ $value | humanizeDuration }}."

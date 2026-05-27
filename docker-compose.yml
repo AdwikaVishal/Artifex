@@ -1,0 +1,421 @@
+# ── Shared environment ────────────────────────────────────────────────────────
+x-common-env: &common-env
+  NATS_URL: nats://nats:4222
+  TEMPORAL_HOST: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: artifex-queue
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_COLLECTION: artifex
+  REDIS_URL: redis://redis:6379
+  GROQ_API_KEY: ${GROQ_API_KEY}
+  TAVILY_API_KEY: ${TAVILY_API_KEY}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_SERVICE_NAME: artifex
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql://artifex:${POSTGRES_PASSWORD:-artifex123}@postgres:5432/placements
+  AUCTION_WINDOW_SECONDS: ${AUCTION_WINDOW_SECONDS:-2}
+  TEAM_FORMATION_TIMEOUT_SECONDS: ${TEAM_FORMATION_TIMEOUT_SECONDS:-2}
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"   # monitoring
+    command: ["--jetstream", "--http_port", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/temporal:latest
+    ports:
+      - "7233:7233"
+      - "8233:8233"   # Temporal Web UI
+    command:
+      - "server"
+      - "start-dev"
+      - "--ip"
+      - "0.0.0.0"
+      - "--port"
+      - "7233"
+      - "--ui-port"
+      - "8233"
+      - "--namespace"
+      - "default"
+      - "--db-filename"
+      - "/tmp/temporal.db"
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--address", "localhost:7233", "--namespace", "default"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: artifex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-artifex123}
+      POSTGRES_DB: placements
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artifex -d placements"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Observability ───────────────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel/config.yaml
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=artifex
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - prometheus
+
+  # ── Agents ──────────────────────────────────────────────────────────────────
+  planner:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.planner
+    environment:
+      <<: *common-env
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  retriever:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.retriever
+    environment:
+      <<: *common-env
+    depends_on:
+      nats:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  executor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor
+    environment:
+      <<: *common-env
+      EXECUTOR_INSTANCE: "executor"
+      EXECUTOR_SUBJECT: "agent.executor.inbox"
+      EXECUTOR_CAPABILITIES: "search,direct_answer,http,shell,file"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # executor-a: search-optimised instance
+  executor-a:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor
+    environment:
+      <<: *common-env
+      EXECUTOR_INSTANCE: "executor-a"
+      EXECUTOR_SUBJECT: "agent.executor_search.inbox"
+      EXECUTOR_CAPABILITIES: "search,direct_answer"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # executor-b: tool-optimised instance (http / shell / file)
+  executor-b:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor
+    environment:
+      <<: *common-env
+      EXECUTOR_INSTANCE: "executor-b"
+      EXECUTOR_SUBJECT: "agent.executor_tools.inbox"
+      EXECUTOR_CAPABILITIES: "http,shell,file,execute"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Agent-voting executors (three models, same task → vote on best answer) ──
+
+  # executor-llama: llama-3.1-8b-instant (fast, general-purpose)
+  executor-llama:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor
+    environment:
+      <<: *common-env
+      EXECUTOR_INSTANCE: "executor-llama"
+      EXECUTOR_MODEL: "llama-3.1-8b-instant"
+      EXECUTOR_SUBJECT: "agent.executor_llama.inbox"
+      EXECUTOR_CAPABILITIES: "search,direct_answer"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # executor-gemma: gemma2-9b-it (strong reasoning)
+  executor-gemma:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor
+    environment:
+      <<: *common-env
+      EXECUTOR_INSTANCE: "executor-gemma"
+      EXECUTOR_MODEL: "gemma2-9b-it"
+      EXECUTOR_SUBJECT: "agent.executor_gemma.inbox"
+      EXECUTOR_CAPABILITIES: "search,direct_answer"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # executor-mixtral: mixtral-8x7b-32768 (large context, diverse perspective)
+  executor-mixtral:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor
+    environment:
+      <<: *common-env
+      EXECUTOR_INSTANCE: "executor-mixtral"
+      EXECUTOR_MODEL: "mixtral-8x7b-32768"
+      EXECUTOR_SUBJECT: "agent.executor_mixtral.inbox"
+      EXECUTOR_CAPABILITIES: "search,direct_answer"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # validator: general-purpose fallback (used by validator_activity)
+  validator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.validator
+    environment:
+      <<: *common-env
+      VALIDATOR_INSTANCE: "validator"
+      VALIDATOR_MODEL: "llama-3.1-8b-instant"
+      VALIDATOR_SUBJECT: "agent.validator.inbox"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # validator-a: primary validator (llama-3.1-8b-instant) for consensus
+  validator-a:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.validator
+    environment:
+      <<: *common-env
+      VALIDATOR_INSTANCE: "validator-a"
+      VALIDATOR_MODEL: "llama-3.1-8b-instant"
+      VALIDATOR_SUBJECT: "agent.validator_a.inbox"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # validator-b: secondary validator (gemma2-9b-it) for consensus
+  validator-b:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.validator
+    environment:
+      <<: *common-env
+      VALIDATOR_INSTANCE: "validator-b"
+      VALIDATOR_MODEL: "gemma2-9b-it"
+      VALIDATOR_SUBJECT: "agent.validator_b.inbox"
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # dispatcher: routes tasks to the best executor based on capabilities + performance
+  dispatcher:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.executor   # reuse slim python image
+    environment:
+      <<: *common-env
+    command: ["python", "-m", "scripts.run_agent", "dispatcher"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9098/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  supervisor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.supervisor
+    environment:
+      <<: *common-env
+      IN_CLUSTER: "false"
+      K8S_NAMESPACE: artifex
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  recovery:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.supervisor   # reuse slim image
+    environment:
+      <<: *common-env
+    command: ["python", "-m", "scripts.run_agent", "recovery"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    # Override the supervisor healthcheck – recovery runs on port 9096
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9096/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  temporal-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.temporal_worker
+    environment:
+      <<: *common-env
+    volumes:
+      - ./models:/app/models   # mount trained model files (dev); bake into image for prod
+    depends_on:
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  foster-monitor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.supervisor   # reuse slim python image
+    environment:
+      <<: *common-env
+    command: ["python", "-m", "scripts.run_agent", "foster_monitor"]
+    depends_on:
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9097/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # swarm-manager: conducts task auctions and forms ad-hoc teams (emergent collaboration)
+  swarm-manager:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.supervisor   # reuse slim python image
+    environment:
+      <<: *common-env
+    command: ["python", "-m", "scripts.run_agent", "swarm_manager"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9099/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+    volumes:
+      - ./api:/app/api                     # hot-reload: changes to api/ take effect on container restart
+      - ./nats_client:/app/nats_client
+    depends_on:
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  grafana_data:
+  postgres_data:

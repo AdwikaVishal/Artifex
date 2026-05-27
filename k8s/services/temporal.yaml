@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: artifex
+spec:
+  selector:
+    app: temporal-frontend
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233
+  type: ClusterIP

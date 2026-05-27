@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: artifex
+  labels:
+    app.kubernetes.io/name: artifex
+    app.kubernetes.io/managed-by: kubectl

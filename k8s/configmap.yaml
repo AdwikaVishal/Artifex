@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifex-config
+  namespace: artifex
+data:
+  NATS_URL: "nats://nats:4222"
+  TEMPORAL_HOST: "temporal-frontend:7233"
+  TEMPORAL_NAMESPACE: "default"
+  TEMPORAL_TASK_QUEUE: "artifex-queue"
+  QDRANT_URL: "http://qdrant:6333"
+  QDRANT_COLLECTION: "artifex"
+  REDIS_URL: "redis://redis:6379"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  OTEL_SERVICE_NAME: "artifex"
+  LOG_LEVEL: "INFO"
+  K8S_NAMESPACE: "artifex"
+  IN_CLUSTER: "true"
