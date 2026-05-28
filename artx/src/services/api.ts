@@ -1,0 +1,69 @@
+import axios from 'axios'
+
+const API_URL = import.meta.env.VITE_API_URL || ''
+
+console.log(`[api] Initializing API client, baseURL: "${API_URL}" (from VITE_API_URL)`)
+
+export class ApiError extends Error {
+  status: number | null
+  constructor(message: string, status: number | null = null) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+export const api = axios.create({
+  baseURL: API_URL,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  timeout: 15000,
+})
+
+api.interceptors.request.use(
+  (config) => {
+    console.log(
+      `[api] ➡ ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`,
+      config.data ? { body: config.data } : ''
+    )
+    return config
+  },
+  (error) => {
+    console.error('[api] Request setup error:', error)
+    return Promise.reject(new ApiError(error.message))
+  }
+)
+
+api.interceptors.response.use(
+  (response) => {
+    console.log(`[api] ⬅ ${response.status} ${response.config.url}`, response.data)
+    return response
+  },
+  (error) => {
+    if (error.response) {
+      const { status, data } = error.response
+      const detail = data?.detail
+      const message = Array.isArray(detail)
+        ? detail.map((d: { msg?: string }) => d.msg).join('; ')
+        : detail || data?.message || data?.error || `Server error (${status})`
+      console.error(`[api] ❌ ${status} ${error.config?.url}:`, data)
+      return Promise.reject(new ApiError(message, status))
+    }
+
+    if (error.request) {
+      const url = error.config?.url || 'unknown'
+      console.error(`[api] ❌ Network error for ${url}:`, error.message)
+      return Promise.reject(
+        new ApiError(
+          `Cannot reach backend at ${API_URL}${url}. Ensure the server is running. (${error.message})`
+        )
+      )
+    }
+
+    console.error('[api] ❌ Error:', error.message)
+    return Promise.reject(new ApiError(error.message))
+  }
+)
+
+export default api

@@ -12,6 +12,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
 import time
@@ -243,6 +244,10 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
+
+        # Vite frontend
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -943,7 +948,9 @@ async def approve_placement(
     request: Request,
     user: dict = Depends(get_current_user),
 ) -> dict[str, str]:
+    global _pending_approvals
     """
+
     Approve or reject a recommended placement.
 
     Two-factor rule for high-risk placements (risk_score > 75):
@@ -989,7 +996,6 @@ async def approve_placement(
         }
 
     # ── Normal approval / rejection ───────────────────────────────────────────
-    global _pending_approvals
     with _approvals_lock:
         _pending_approvals = [
             a for a in _pending_approvals if a["workflow_id"] != approval.workflow_id

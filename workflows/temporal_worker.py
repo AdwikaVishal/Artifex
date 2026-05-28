@@ -1033,38 +1033,7 @@ async def main() -> None:
     # Tell Temporal's sandbox to pass these modules through unchanged instead of
     # trying to sandbox them. structlog, threading, nats, etc. create locks at
     # import time which the sandbox forbids.
-    from temporalio.worker.workflow_sandbox import (
-        SandboxedWorkflowRunner,
-        SandboxRestrictions,
-    )
-
-    sandbox = SandboxedWorkflowRunner(
-        restrictions=SandboxRestrictions.default.with_passthrough_modules(
-            "structlog",
-            "nats",
-            "dotenv",
-            "prometheus_client",
-            "opentelemetry",
-            "threading",
-            "httpx",
-            # langchain + pydantic build validators at import time using
-            # threading locks and isinstance checks that the sandbox rejects.
-            "langchain_core",
-            "langchain",
-            "langchain_groq",
-            "pydantic",
-            "pydantic_core",
-            # ML inference libraries used in activities
-            "pandas",
-            "numpy",
-            "xgboost",
-            "joblib",
-            "sklearn",
-            # Specialist agent + parallel workflow
-            "agents",
-            "collections",
-        )
-    )
+    from temporalio.worker import UnsandboxedWorkflowRunner
 
     worker = Worker(
         client,
@@ -1074,8 +1043,8 @@ async def main() -> None:
             FosterPlacementWorkflow,
             TaskWorkerWorkflow,
             ParallelSubtaskWorkflow,
-            EmergentSwarmWorkflow,          # ← emergent collaboration
-        ],
+            EmergentSwarmWorkflow,
+    ],
         activities=[
             planner_activity,
             retriever_activity,
@@ -1084,23 +1053,21 @@ async def main() -> None:
             validator_a_activity,
             validator_b_activity,
             consensus_activity,
-            # Parallel swarm + voting + specialist
             summarize_activity,
             broadcast_executor_activity,
             voting_validator_activity,
             spawn_specialist_activity,
-            # Foster care activities
             match_child_activity,
             publish_match_activity,
             compute_risk_activity,
             send_alert_activity,
-            # Emergent swarm activities
             announce_task_activity,
             wait_for_team_activity,
             wait_for_result_activity,
-        ],
-        workflow_runner=sandbox,
-    )
+    ],
+        workflow_runner=UnsandboxedWorkflowRunner(),
+)
+
     logger.info("temporal_worker.starting", task_queue=TASK_QUEUE)
     await worker.run()
 
