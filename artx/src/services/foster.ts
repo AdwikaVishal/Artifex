@@ -142,12 +142,18 @@ export async function getPlacements(): Promise<Placement[]> {
   placements.forEach((p, i) => {
     if (!p || typeof p !== 'object') {
       console.warn(`[foster] placement[${i}] is not an object:`, p)
-    } else {
-      Object.entries(p).forEach(([key, val]) => {
-        if (val === null || val === undefined) {
-          console.warn(`[foster] placement[${i}].${key} is ${val}`)
+      return
+    }
+    // Only warn about null fields on placements that have had time to process
+    // (i.e. not brand-new pending records still running through the pipeline)
+    const isProcessing = p.status === 'pending' && !p.family_id && !p.family_json
+    if (!isProcessing) {
+      const expectedFields: (keyof Placement)[] = ['family_id', 'family_json', 'match_explanation', 'last_notes', 'foster_family_name', 'location', 'capacity', 'recommended_family']
+      for (const field of expectedFields) {
+        if (p[field] == null) {
+          console.debug(`[foster] placement[${i}].${field} is null (workflow_id: ${p.workflow_id})`)
         }
-      })
+      }
     }
   })
 
@@ -268,8 +274,21 @@ export async function sendChatMessage(
 ): Promise<{ id: string; message: string; sources?: string[]; actions?: { label: string; action: string; payload?: Record<string, unknown> }[] }> {
   const body: Record<string, unknown> = { message }
   if (workflowId) body.workflow_id = workflowId
-  const res = await api.post('/chat', body)
-  return res.data
+  const res = await api.post<
+    | string
+    | { id?: string; message?: string; sources?: string[] }
+  >('/chat', body)
+
+  // Handle both plain-text and JSON responses
+  if (typeof res.data === 'string') {
+    return { id: `chat-${Date.now()}`, message: res.data, sources: [] }
+  }
+  const data = res.data as { id?: string; message?: string; sources?: string[] }
+  return {
+    id: data.id || `chat-${Date.now()}`,
+    message: data.message || String(res.data),
+    sources: data.sources || [],
+  }
 }
 
 export async function getHealthCheck(): Promise<boolean> {
@@ -332,21 +351,42 @@ export function subscribeWorkflowStream(
 ): { close: () => void } {
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
   const host = window.location.host
-  const url = `${protocol}://${host}/workflow/${encodeURIComponent(workflowId)}/stream`
+  const token = localStorage.getItem('artifex_token') || ''
+  const url = `${protocol}://${host}/workflow/${encodeURIComponent(workflowId)}/stream?token=${encodeURIComponent(token)}`
 
   let ws: WebSocket | null = null
   let shouldClose = false
+  // Fix ③: exponential backoff with full jitter (capped at 30 s)
+  let attempt = 0
+  const MAX_DELAY_MS = 30_000
+
+  function backoffDelay(): number {
+    const base = Math.min(500 * 2 ** attempt, MAX_DELAY_MS)
+    // full jitter: random value in [0, base]
+    return Math.random() * base
+  }
 
   function connect() {
     ws = new WebSocket(url)
-    ws.onopen = () => { onOpen && onOpen() }
+    ws.onopen = () => {
+      attempt = 0  // reset backoff on successful connection
+      onOpen?.()
+    }
     ws.onmessage = (ev) => {
       try { const data = JSON.parse(ev.data); onMessage(data) } catch (err) { console.warn('[foster.ws] parse error', err) }
     }
-    ws.onclose = () => {
-      if (shouldClose) { onClose && onClose(); return }
-      // reconnect with backoff
-      setTimeout(() => connect(), 1000)
+    ws.onclose = (ev) => {
+      if (shouldClose) { onClose?.(); return }
+      // 1008 = policy violation (auth failure) – do not reconnect
+      if (ev.code === 1008) {
+        console.warn('[foster.ws] auth rejected (1008), not reconnecting')
+        onClose?.()
+        return
+      }
+      const delay = backoffDelay()
+      attempt++
+      console.info(`[foster.ws] closed (code ${ev.code}), reconnecting in ${Math.round(delay)}ms (attempt ${attempt})`)
+      setTimeout(() => connect(), delay)
     }
     ws.onerror = (e) => { console.warn('[foster.ws] error', e) }
   }
@@ -379,7 +419,124 @@ export async function getDashboardEvents(): Promise<WorkflowEvent[]> {
   return []
 }
 
+export interface WorkflowActivityEntry {
+  name: string
+  submitted: number
+  matched: number
+  approved: number
+}
+
+export async function getWorkflowActivity(): Promise<WorkflowActivityEntry[]> {
+  const res = await api.get<{ activity: WorkflowActivityEntry[] }>('/dashboard/workflow-activity')
+  return res.data?.activity ?? []
+}
+
 export async function getAgentStatuses(): Promise<AgentStatusMap> {
   const res = await api.get<AgentStatusMap>('/agent/status')
+  return res.data
+}
+
+// ── Crisis Prediction ─────────────────────────────────────────────────────
+
+export interface CrisisPrediction {
+  probability: number
+  risk_level: 'low' | 'medium' | 'high' | 'critical'
+  top_reasons: Array<{ reason: string; weight: number }>
+  recommended_interventions: string[]
+  prediction_date?: string
+  cached?: boolean
+}
+
+export async function getCrisisPrediction(placementId: string): Promise<CrisisPrediction> {
+  const res = await api.get<CrisisPrediction>(
+    `/api/placements/${encodeURIComponent(placementId)}/crisis-prediction`
+  )
+  return res.data
+}
+
+export async function refreshCrisisPrediction(placementId: string): Promise<CrisisPrediction> {
+  const res = await api.post<CrisisPrediction>(
+    `/api/placements/${encodeURIComponent(placementId)}/refresh-prediction`
+  )
+  return res.data
+}
+
+// ── Fairness Metrics ──────────────────────────────────────────────────────
+
+export interface FairnessGroupBreakdown {
+  group: string
+  total: number
+  high_risk: number
+  high_risk_rate: number
+}
+
+export interface FairnessMetrics {
+  gender_bias: number
+  special_needs_bias: number
+  emergency_level_bias: number
+  threshold: number
+  status: 'PASS' | 'REVIEW'
+  total_placements: number
+  last_calculated: string
+  breakdowns: {
+    gender: FairnessGroupBreakdown[]
+    special_needs: FairnessGroupBreakdown[]
+    emergency_level: FairnessGroupBreakdown[]
+  }
+}
+
+export async function getFairnessMetrics(): Promise<FairnessMetrics> {
+  const res = await api.get<FairnessMetrics>('/api/fairness/metrics')
+  return res.data
+}
+
+export interface ShapExplanation {
+  workflow_id: string
+  match_score: number | null
+  confidence_score: number | null
+  feature_importance: Array<{
+    feature: string
+    importance: number
+    description: string
+  }>
+  top_matches: unknown[]
+}
+
+export async function getShapExplanation(workflowId: string): Promise<ShapExplanation> {
+  const res = await api.get<ShapExplanation>(
+    `/api/fairness/shap/${encodeURIComponent(workflowId)}`
+  )
+  return res.data
+}
+
+// ── Child Timeline ────────────────────────────────────────────────────────
+
+export interface TimelineEvent {
+  date: string | null
+  type: 'entry' | 'placement' | 'workflow' | 'incident' | 'checkin'
+  title: string
+  description: string
+  icon: string
+  risk_score?: number
+  mood_score?: number
+  workflow_id?: string
+}
+
+export interface ChildTimeline {
+  child_id: string
+  child_name: string
+  age: number | null
+  emergency_level: string
+  special_needs: boolean
+  school: string | null
+  milestones: unknown[]
+  therapy_history: unknown[]
+  timeline: TimelineEvent[]
+}
+
+export async function getChildTimeline(childId: string): Promise<ChildTimeline> {
+  const res = await api.get<ChildTimeline>(
+    `/children/${encodeURIComponent(childId)}/timeline`
+  )
   return res.data
 }

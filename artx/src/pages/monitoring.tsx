@@ -1,4 +1,4 @@
-import { useAgentStatuses, useHealth, useDashboardMetrics } from '@/hooks/use-foster'
+import { useAgentStatuses, useHealth, useDashboardMetrics, useWorkflowActivity } from '@/hooks/use-foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { StatusBadge } from '@/components/ui/badge'
 import { DataLoader } from '@/components/data-loader'
@@ -8,8 +8,9 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar,
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell,
 } from 'recharts'
+import { useQueryClient } from '@tanstack/react-query'
 
 function ServiceCard({ name, icon: Icon, status, latency }: { name: string; icon: React.ElementType; status: string; latency?: number }) {
   return (
@@ -37,10 +38,30 @@ function ServiceCard({ name, icon: Icon, status, latency }: { name: string; icon
 }
 
 export default function MonitoringPage() {
-  const { data: agentMap, isLoading: agentsLoading, error: agentsError } = useAgentStatuses()
-  const { data: health, isLoading: healthLoading, error: healthError } = useHealth()
+  const { data: agentMap, isLoading: agentsLoading, error: agentsError, refetch: refetchAgents } = useAgentStatuses()
+  const { data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth } = useHealth()
   const { data: metrics } = useDashboardMetrics()
+  const { data: activity } = useWorkflowActivity()
+  const queryClient = useQueryClient()
   const agents = agentMap?.agents ? Object.values(agentMap.agents) : []
+
+  const handleRefresh = () => {
+    refetchAgents()
+    refetchHealth()
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+  }
+
+  // Build latency chart data from health check
+  const latencyData = [
+    { name: 'PostgreSQL', latency: health?.services?.postgres?.latency_ms ?? 0, color: '#10b981' },
+    { name: 'NATS', latency: health?.services?.nats?.latency_ms ?? 0, color: '#06b6d4' },
+    { name: 'Temporal', latency: health?.services?.temporal?.latency_ms ?? 0, color: '#6366f1' },
+  ].filter(d => d.latency > 0)
+
+  // Build throughput data from workflow activity
+  const throughputData = activity && activity.length > 0
+    ? activity.map(a => ({ name: a.name, events: a.submitted + a.matched + a.approved }))
+    : [{ name: 'No data', events: 0 }]
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
@@ -51,11 +72,14 @@ export default function MonitoringPage() {
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="status-dot status-dot--active" />
-            <span className="text-xs text-muted-foreground">All Systems</span>
+            <div className={`status-dot ${health?.status === 'ok' ? 'status-dot--active' : 'status-dot--warning'}`} />
+            <span className="text-xs text-muted-foreground">{health?.status === 'ok' ? 'All Systems' : 'Degraded'}</span>
           </div>
           <span className="text-muted">|</span>
           <span className="text-xs text-muted-foreground font-mono">{metrics?.active_workflows ?? 0} active workflows</span>
+          <Button variant="ghost" size="sm" onClick={handleRefresh}>
+            <RefreshCw size={14} />
+          </Button>
         </div>
       </div>
 
@@ -122,32 +146,51 @@ export default function MonitoringPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <GlassCard>
           <GlassCardHeader>
-            <GlassCardTitle>Event Throughput (24h)</GlassCardTitle>
+            <GlassCardTitle>Event Throughput (7 days)</GlassCardTitle>
             <BarChart3 size={16} className="text-muted-foreground" />
           </GlassCardHeader>
-          <div className="h-48 flex items-center justify-center">
-            <p className="text-sm text-muted-foreground">Throughput data from live events feed</p>
+          <div className="h-48" style={{ minHeight: 192 }}>
+            <ResponsiveContainer width="100%" height="100%" minHeight={192}>
+              <BarChart data={throughputData}>
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 11 }} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 11 }} />
+                <Tooltip
+                  contentStyle={{ background: '#1a1a24', border: '1px solid #2a2a3d', borderRadius: '8px', fontSize: '12px' }}
+                  labelStyle={{ color: '#e8e8f0' }}
+                />
+                <Bar dataKey="events" fill="#6366f1" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </GlassCard>
 
         <GlassCard>
           <GlassCardHeader>
-            <GlassCardTitle>Service Latency</GlassCardTitle>
+            <GlassCardTitle>Service Latency (ms)</GlassCardTitle>
             <Activity size={16} className="text-muted-foreground" />
           </GlassCardHeader>
-          <div className="h-48 flex items-center justify-center">
-            <div className="text-center">
-              <p className="text-sm text-muted-foreground">Service latency from health check</p>
-              {health?.services?.postgres?.latency_ms && (
-                <p className="text-xs text-muted-foreground mt-1">PostgreSQL: {health.services.postgres.latency_ms}ms</p>
-              )}
-              {health?.services?.nats?.latency_ms && (
-                <p className="text-xs text-muted-foreground">NATS: {health.services.nats.latency_ms}ms</p>
-              )}
-              {health?.services?.temporal?.latency_ms && (
-                <p className="text-xs text-muted-foreground">Temporal: {health.services.temporal.latency_ms}ms</p>
-              )}
-            </div>
+          <div className="h-48" style={{ minHeight: 192 }}>
+            {latencyData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%" minHeight={192}>
+                <BarChart data={latencyData} layout="vertical">
+                  <XAxis type="number" axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 11 }} />
+                  <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 11 }} width={80} />
+                  <Tooltip
+                    contentStyle={{ background: '#1a1a24', border: '1px solid #2a2a3d', borderRadius: '8px', fontSize: '12px' }}
+                    formatter={(v: number) => [`${v}ms`, 'Latency']}
+                  />
+                  <Bar dataKey="latency" radius={[0, 4, 4, 0]}>
+                    {latencyData.map((entry, i) => (
+                      <Cell key={i} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center">
+                <p className="text-sm text-muted-foreground">Waiting for health data…</p>
+              </div>
+            )}
           </div>
         </GlassCard>
       </div>
@@ -155,7 +198,7 @@ export default function MonitoringPage() {
       <GlassCard>
         <GlassCardHeader>
           <GlassCardTitle>AI Agent Status</GlassCardTitle>
-          <Button variant="ghost" size="sm">
+          <Button variant="ghost" size="sm" onClick={handleRefresh}>
             <RefreshCw size={14} />
           </Button>
         </GlassCardHeader>

@@ -1257,9 +1257,6 @@ async def main() -> None:
         wait_for_result_activity,
     )
 
-    # Tell Temporal's sandbox to pass these modules through unchanged instead of
-    # trying to sandbox them. structlog, threading, nats, etc. create locks at
-    # import time which the sandbox forbids.
     from temporalio.worker import UnsandboxedWorkflowRunner
 
     worker = Worker(
@@ -1271,7 +1268,7 @@ async def main() -> None:
             TaskWorkerWorkflow,
             ParallelSubtaskWorkflow,
             EmergentSwarmWorkflow,
-    ],
+        ],
         activities=[
             planner_activity,
             retriever_activity,
@@ -1292,9 +1289,9 @@ async def main() -> None:
             announce_task_activity,
             wait_for_team_activity,
             wait_for_result_activity,
-    ],
+        ],
         workflow_runner=UnsandboxedWorkflowRunner(),
-)
+    )
 
     logger.info("temporal_worker.starting", task_queue=TASK_QUEUE)
     await worker.run()

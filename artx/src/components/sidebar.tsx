@@ -11,8 +11,12 @@ import {
   Activity,
   ChevronLeft,
   ChevronRight,
+  LogOut,
+  Shield,
+  Users,
 } from 'lucide-react'
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
@@ -21,6 +25,8 @@ const navItems = [
   { icon: CheckSquare, label: 'Approvals', path: '/approvals' },
   { icon: Home, label: 'Placements', path: '/placements' },
   { icon: Building2, label: 'Families', path: '/families' },
+  { icon: Users, label: 'Children', path: '/children' },
+  { icon: Shield, label: 'Fairness', path: '/fairness' },
   { icon: MessageSquare, label: 'AI Assistant', path: '/chat' },
   { icon: Activity, label: 'Monitoring', path: '/monitoring' },
 ]
@@ -28,6 +34,13 @@ const navItems = [
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
   const location = useLocation()
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login', { replace: true })
+  }
 
   return (
     <aside
@@ -75,7 +88,26 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="p-2 border-t border-border">
+      {/* User info + logout */}
+      <div className="px-2 pb-2 border-t border-border pt-2 space-y-1">
+        {!collapsed && user && (
+          <div className="px-3 py-2">
+            <p className="text-xs text-foreground font-medium truncate">{user.user_id}</p>
+            <p className="text-[10px] text-muted-foreground capitalize">{user.role}</p>
+          </div>
+        )}
+        <button
+          onClick={handleLogout}
+          className={cn(
+            'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm w-full transition-all duration-200',
+            'text-muted-foreground hover:text-destructive hover:bg-destructive/10 border border-transparent',
+            collapsed && 'justify-center px-2'
+          )}
+          title={collapsed ? 'Sign out' : undefined}
+        >
+          <LogOut size={18} className="shrink-0" />
+          {!collapsed && <span>Sign out</span>}
+        </button>
         <button
           onClick={() => setCollapsed(!collapsed)}
           className="flex items-center justify-center w-full h-8 rounded-lg text-muted-foreground hover:text-foreground hover:bg-glass-hover transition-all cursor-pointer"

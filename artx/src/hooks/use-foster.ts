@@ -17,6 +17,12 @@ import {
   createFamily,
   updateFamily,
   deleteFamily,
+  getWorkflowActivity,
+  getCrisisPrediction,
+  refreshCrisisPrediction,
+  getFairnessMetrics,
+  getShapExplanation,
+  getChildTimeline,
 } from '@/services/foster'
 import type { ReferralSubmission, ApproveRequest, FamilyCreate, FamilyUpdate } from '@/types'
 
@@ -52,6 +58,14 @@ export function useAgentStatuses() {
   })
 }
 
+export function useWorkflowActivity() {
+  return useQuery({
+    queryKey: ['dashboard', 'workflow-activity'],
+    queryFn: getWorkflowActivity,
+    refetchInterval: 60000,
+  })
+}
+
 export function useSubmitReferral() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -79,6 +93,8 @@ export function useApproveReferral() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['approvals'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['placements'] })
+      queryClient.invalidateQueries({ queryKey: ['families'] })
     },
   })
 }
@@ -90,6 +106,8 @@ export function useSupervisorApprove() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['approvals'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['placements'] })
+      queryClient.invalidateQueries({ queryKey: ['families'] })
     },
   })
 }
@@ -261,5 +279,60 @@ export function useChat() {
   return useMutation({
     mutationFn: ({ message, workflowId }: { message: string; workflowId?: string }) =>
       sendChatMessage(message, workflowId),
+  })
+}
+
+// ── Crisis Prediction hooks ───────────────────────────────────────────────
+
+export function useCrisisPrediction(placementId: string | null) {
+  return useQuery({
+    queryKey: ['crisis-prediction', placementId],
+    queryFn: () => getCrisisPrediction(placementId!),
+    enabled: !!placementId,
+    staleTime: 1000 * 60 * 60, // 1 hour – predictions are cached 24h server-side
+    retry: 1,
+  })
+}
+
+export function useRefreshCrisisPrediction() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (placementId: string) => refreshCrisisPrediction(placementId),
+    onSuccess: (_data, placementId) => {
+      queryClient.invalidateQueries({ queryKey: ['crisis-prediction', placementId] })
+    },
+  })
+}
+
+// ── Fairness hooks ────────────────────────────────────────────────────────
+
+export function useFairnessMetrics() {
+  return useQuery({
+    queryKey: ['fairness', 'metrics'],
+    queryFn: getFairnessMetrics,
+    staleTime: 1000 * 60 * 5, // 5 minutes
+    retry: 1,
+  })
+}
+
+export function useShapExplanation(workflowId: string | null) {
+  return useQuery({
+    queryKey: ['fairness', 'shap', workflowId],
+    queryFn: () => getShapExplanation(workflowId!),
+    enabled: !!workflowId,
+    staleTime: 1000 * 60 * 10,
+    retry: 1,
+  })
+}
+
+// ── Child Timeline hook ───────────────────────────────────────────────────
+
+export function useChildTimeline(childId: string | null) {
+  return useQuery({
+    queryKey: ['child-timeline', childId],
+    queryFn: () => getChildTimeline(childId!),
+    enabled: !!childId,
+    staleTime: 1000 * 60 * 2, // 2 minutes
+    retry: 1,
   })
 }

@@ -31,6 +31,26 @@ from .base import BaseAgent
 logger = structlog.get_logger()
 
 
+# ── Capability aliases ────────────────────────────────────────────────────────
+# Maps canonical tool names to all accepted variants so that tasks using
+# "web_search" can match executors that advertise "search", and vice-versa.
+
+CAPABILITY_ALIASES: dict[str, list[str]] = {
+    "web_search":    ["search", "web_search", "web-search"],
+    "search":        ["search", "web_search", "web-search"],
+    "direct_answer": ["direct_answer", "llm_answer", "direct"],
+    "http":          ["http", "http_request", "api"],
+    "shell":         ["shell", "bash", "exec"],
+    "file":          ["file", "file_io", "fs"],
+    "execute":       ["execute", "exec", "shell", "bash"],
+}
+
+
+def _resolve_aliases(tool: str) -> list[str]:
+    """Return all known aliases for a tool name (including itself)."""
+    return CAPABILITY_ALIASES.get(tool, [tool])
+
+
 class DispatcherAgent(BaseAgent):
     """Routes executor tasks to the best available executor instance."""
 
@@ -61,7 +81,24 @@ class DispatcherAgent(BaseAgent):
         reply_to  = msg.get("_reply") or msg.get("reply_to")
 
         registry = get_registry()
+
+        # Try the exact tool first, then fall back through aliases
         target_inbox = registry.select(task_type, tool)
+        if target_inbox == Subjects.EXECUTOR_INBOX and tool:
+            # Fallback: try each alias until we find a better match
+            for alias in _resolve_aliases(tool):
+                if alias == tool:
+                    continue
+                candidate = registry.select(task_type, alias)
+                if candidate != Subjects.EXECUTOR_INBOX:
+                    target_inbox = candidate
+                    self._log.info(
+                        "dispatcher.alias_resolved",
+                        original_tool=tool,
+                        alias=alias,
+                        target=target_inbox,
+                    )
+                    break
 
         self._log.info(
             "dispatcher.routing",
@@ -70,12 +107,7 @@ class DispatcherAgent(BaseAgent):
             target=target_inbox,
         )
 
-        if reply_to:
-            # Forward with the original reply address so the executor can
-            # respond directly to the Temporal activity.
-            await self.publish(target_inbox, msg)
-        else:
-            await self.publish(target_inbox, msg)
+        await self.publish(target_inbox, msg)
 
     # ── Registry snapshot endpoint (for observability) ────────────────────────
 

@@ -14,7 +14,7 @@ import { motion } from 'framer-motion'
 import { Search, Clock, AlertCircle, RefreshCw, ArrowLeft } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { WorkflowStatus, WorkflowStage } from '@/types'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 function formatPercent(value?: number | null, decimals = 0): string {
   if (value == null || Number.isNaN(value)) return '—'
@@ -29,7 +29,23 @@ function formatRiskScore(value?: number | null): string {
 }
 
 function normalizeTimelineEvents(events: WorkflowStage[]): WorkflowStage[] {
-  return (events || []).map((event, index) => {
+  // Deduplicate: for each stage, keep the most meaningful status
+  // (completed > in_progress > failed > pending) to avoid duplicate React keys
+  const STATUS_RANK: Record<string, number> = {
+    completed: 4, in_progress: 3, failed: 2, pending: 1,
+  }
+  const seen = new Map<string, WorkflowStage>()
+  for (const event of events || []) {
+    const stageName = event.stage || event.name || ''
+    const existing = seen.get(stageName)
+    const rank = STATUS_RANK[event.status] ?? 0
+    const existingRank = existing ? (STATUS_RANK[existing.status] ?? 0) : -1
+    if (!existing || rank > existingRank) {
+      seen.set(stageName, event)
+    }
+  }
+
+  return Array.from(seen.values()).map((event, index) => {
     const stageName = event.stage || event.name || `event-${index}`
     const label = event.label || getStageLabel(event.stage || event.name || '') || String(stageName)
     const details = event.details ||
@@ -64,7 +80,7 @@ function TimelineView({ timeline }: { timeline: WorkflowStage[] }) {
         const isActive = stage.status === 'in_progress'
         const isFailed = stage.status === 'failed'
         return (
-          <div key={stage.name || `${stage.stage}-${i}`} className="flex gap-4">
+          <div key={`${stage.name || stage.stage || 'stage'}-${i}`} className="flex gap-4">
             <div className="flex flex-col items-center">
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all duration-300 ${
                 isCompleted ? 'bg-primary border-primary text-white' :
@@ -144,6 +160,10 @@ export default function WorkflowTrackingPage() {
   const [searchInput, setSearchInput] = useState(routeWorkflowId || '')
   const queryClient = useQueryClient()
 
+  // Fix ④: track the timestamp of the most recent WebSocket push so the
+  // 5-second REST poll never overwrites data that is already fresher.
+  const wsLastUpdatedRef = useRef<number>(0)
+
   console.log(`[workflow-tracking] render — route param: "${params.workflowId}", path-derived: "${extractWorkflowIdFromPath()}", state: "${workflowId}"`)
 
   useEffect(() => {
@@ -173,6 +193,14 @@ export default function WorkflowTrackingPage() {
       const response = await api.get<WorkflowStatus>(url)
       console.log(`[workflow-tracking] ✅ queryFn response:`, response.data)
       console.log(`[workflow-tracking] workflow.status type: ${typeof response.data?.status} value:`, response.data?.status)
+      // Fix ④: if a WebSocket push arrived in the last 3 s, keep that data
+      // and discard this (potentially stale) REST snapshot.
+      const age = Date.now() - wsLastUpdatedRef.current
+      if (age < 3000) {
+        console.log(`[workflow-tracking] skipping REST update — WS data is ${age}ms old`)
+        const cached = queryClient.getQueryData<WorkflowStatus>(['workflow-status', workflowId])
+        if (cached) return cached
+      }
       return response.data
     },
     enabled: workflowId !== null && workflowId !== undefined && workflowId.trim().length > 0,
@@ -203,6 +231,8 @@ export default function WorkflowTrackingPage() {
       workflowId,
       (msg) => {
         console.log('[workflow-tracking] ws message', msg)
+        // Fix ④: stamp the time so the REST poll knows WS data is fresh
+        wsLastUpdatedRef.current = Date.now()
         queryClient.setQueryData(['workflow-status', workflowId], (current) => {
           const existing = (current as WorkflowStatus) || {
             workflow_id: workflowId,

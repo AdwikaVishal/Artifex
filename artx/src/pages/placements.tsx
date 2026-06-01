@@ -10,6 +10,7 @@ import { motion } from 'framer-motion'
 import { Search, Home, MapPin, Users, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react'
 import type { TopMatch } from '@/types'
 import { useNavigate } from 'react-router-dom'
+import { CrisisAlertCard } from '@/components/CrisisAlertCard'
 
 function AltMatches({ matches, index }: { matches: TopMatch[]; index: number }) {
   const [open, setOpen] = useState(false)
@@ -109,7 +110,7 @@ export default function PlacementsPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {filtered.map((placement, i) => (
               <motion.div
-                key={placement?.id || `placement-${i}`}
+                key={placement?.workflow_id || `placement-${i}`}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.03 }}
@@ -183,6 +184,13 @@ export default function PlacementsPage() {
                       matches={placement.top_matches}
                       index={i}
                     />
+                  )}
+
+                  {/* Crisis prediction for high-risk placements */}
+                  {(placement?.risk_score ?? 0) > 60 && placement?.workflow_id && (
+                    <div className="mt-3">
+                      <CrisisAlertCard placementId={placement.workflow_id} />
+                    </div>
                   )}
 
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">

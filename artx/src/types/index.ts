@@ -117,12 +117,15 @@ export interface Placement {
   workflow_id?: string
   child_id?: string
   family_id?: string
+  family_json?: Record<string, unknown> | null
   recommended_family?: string | Record<string, unknown>
   foster_family_name?: string
   family?: Record<string, unknown>
   location?: string
   emergency_level?: string
   risk_score?: number
+  match_explanation?: string | null
+  last_notes?: string | null
   status?: string
   current_stage?: string
   progress?: number

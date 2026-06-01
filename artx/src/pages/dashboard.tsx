@@ -1,4 +1,4 @@
-import { useDashboardMetrics, useRiskDistribution, useDashboardEvents, useAgentStatuses, useMlInsights } from '@/hooks/use-foster'
+import { useDashboardMetrics, useRiskDistribution, useDashboardEvents, useAgentStatuses, useMlInsights, useWorkflowActivity, usePlacements } from '@/hooks/use-foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle, GlassCardValue } from '@/components/ui/glass-card'
 import { DataLoader } from '@/components/data-loader'
 import { StatusBadge, EmergencyBadge } from '@/components/ui/badge'
@@ -9,6 +9,9 @@ import { Activity, CheckCircle, Home, AlertTriangle, TrendingUp, TrendingDown, A
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie,
 } from 'recharts'
+import { useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { CrisisAlertCard } from '@/components/CrisisAlertCard'
 
 const container = {
   hidden: { opacity: 0 },
@@ -64,8 +67,8 @@ function RiskPieChart({ data }: { data: { low: number; medium: number; high: num
   ]
 
   return (
-    <div className="h-48">
-      <ResponsiveContainer width="100%" height="100%">
+    <div className="h-48" style={{ minHeight: 192 }}>
+      <ResponsiveContainer width="100%" height="100%" minHeight={192}>
         <PieChart>
           <Pie
             data={chartData}
@@ -167,19 +170,18 @@ function EventFeed() {
 }
 
 function WorkflowActivityChart() {
-  const data = [
-    { name: 'Mon', submitted: 4, matched: 2, approved: 1 },
-    { name: 'Tue', submitted: 6, matched: 3, approved: 2 },
-    { name: 'Wed', submitted: 3, matched: 5, approved: 3 },
-    { name: 'Thu', submitted: 7, matched: 4, approved: 2 },
-    { name: 'Fri', submitted: 5, matched: 6, approved: 4 },
-    { name: 'Sat', submitted: 2, matched: 2, approved: 1 },
-    { name: 'Sun', submitted: 3, matched: 3, approved: 2 },
-  ]
+  const { data: activity, isLoading } = useWorkflowActivity()
+
+  // Fallback to empty array while loading; chart renders gracefully with no data
+  const data = activity && activity.length > 0
+    ? activity
+    : isLoading
+      ? []
+      : [{ name: 'No data', submitted: 0, matched: 0, approved: 0 }]
 
   return (
-    <div className="h-64">
-      <ResponsiveContainer width="100%" height="100%">
+    <div className="h-64" style={{ minHeight: 256 }}>
+      <ResponsiveContainer width="100%" height="100%" minHeight={256}>
         <AreaChart data={data}>
           <defs>
             <linearGradient id="submitted" x1="0" y1="0" x2="0" y2="1">
@@ -286,9 +288,99 @@ function MlInsightsPanel() {
 }
 
 
+function CrisisAlertsPanel() {
+  const { data: placements } = usePlacements()
+  const highRisk = (placements ?? []).filter((p) => (p.risk_score ?? 0) > 60)
+
+  if (highRisk.length === 0) return null
+
+  return (
+    <motion.div variants={item}>
+      <GlassCard>
+        <GlassCardHeader>
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-destructive" />
+            <GlassCardTitle>Crisis Risk Alerts</GlassCardTitle>
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {highRisk.length} high-risk placement{highRisk.length !== 1 ? 's' : ''}
+          </span>
+        </GlassCardHeader>
+        <div className="px-4 pb-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {highRisk.slice(0, 6).map((p) => (
+            <div key={p.workflow_id}>
+              <p className="text-xs text-muted-foreground font-mono mb-1.5">
+                {p.child_id} · {p.workflow_id}
+              </p>
+              <CrisisAlertCard placementId={p.workflow_id} />
+            </div>
+          ))}
+        </div>
+      </GlassCard>
+    </motion.div>
+  )
+}
+
+
 export default function DashboardPage() {
   const { data: metrics, isLoading: mLoading, error: mError } = useDashboardMetrics()
   const { data: riskData, isLoading: rLoading, error: rError } = useRiskDistribution()
+  const queryClient = useQueryClient()
+
+  // WebSocket for live placement updates
+  const wsRef = useRef<WebSocket | null>(null)
+  const [wsConnected, setWsConnected] = useState(false)
+
+  useEffect(() => {
+    const token = localStorage.getItem('artifex_token') || ''
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const host = window.location.host
+    const url = `${protocol}://${host}/ws/dashboard?token=${encodeURIComponent(token)}`
+
+    let ws: WebSocket
+    let shouldClose = false
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null
+
+    function connect() {
+      ws = new WebSocket(url)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        setWsConnected(true)
+      }
+
+      ws.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data)
+          if (data.type === 'ping') return
+          if (data.placements) {
+            // Invalidate all dashboard queries to trigger a refresh
+            queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+            queryClient.invalidateQueries({ queryKey: ['placements'] })
+            queryClient.invalidateQueries({ queryKey: ['approvals'] })
+          }
+        } catch (_) {}
+      }
+
+      ws.onclose = (ev) => {
+        setWsConnected(false)
+        if (shouldClose || ev.code === 1008) return
+        retryTimeout = setTimeout(() => connect(), 5000)
+      }
+
+      ws.onerror = () => {
+        setWsConnected(false)
+      }
+    }
+
+    connect()
+
+    return () => {
+      shouldClose = true
+      if (retryTimeout) clearTimeout(retryTimeout)
+      try { ws?.close() } catch (_) {}
+    }
+  }, [queryClient])
 
   return (
     <motion.div variants={container} initial="hidden" animate="show" className="space-y-6">
@@ -299,8 +391,8 @@ export default function DashboardPage() {
             <p className="text-sm text-muted-foreground mt-1">AI foster care orchestration overview</p>
           </div>
           <div className="flex items-center gap-2">
-            <div className="status-dot status-dot--active" />
-            <span className="text-xs text-muted-foreground">System Online</span>
+            <div className={`status-dot ${wsConnected ? 'status-dot--active' : 'status-dot--warning'}`} />
+            <span className="text-xs text-muted-foreground">{wsConnected ? 'Live' : 'Polling'}</span>
           </div>
         </div>
       </motion.div>
@@ -399,6 +491,8 @@ export default function DashboardPage() {
       <motion.div variants={item}>
         <MlInsightsPanel />
       </motion.div>
+
+      <CrisisAlertsPanel />
     </motion.div>
   )
 }

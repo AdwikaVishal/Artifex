@@ -21,8 +21,17 @@ export const api = axios.create({
   timeout: 15000,
 })
 
+// ── Request interceptor: inject Bearer token ──────────────────────────────────
 api.interceptors.request.use(
   (config) => {
+    // Inject stored JWT on every request (AuthContext also sets the default
+    // header, but this interceptor acts as a safety net for requests made
+    // before the context mounts or after a token refresh).
+    const token = localStorage.getItem('artifex_token')
+    if (token && !config.headers['Authorization']) {
+      config.headers['Authorization'] = `Bearer ${token}`
+    }
+
     console.log(
       `[api] ➡ ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`,
       config.data ? { body: config.data } : ''
@@ -35,6 +44,7 @@ api.interceptors.request.use(
   }
 )
 
+// ── Response interceptor: handle errors and 401 redirect ─────────────────────
 api.interceptors.response.use(
   (response) => {
     console.log(`[api] ⬅ ${response.status} ${response.config.url}`, response.data)
@@ -43,6 +53,18 @@ api.interceptors.response.use(
   (error) => {
     if (error.response) {
       const { status, data } = error.response
+
+      // On 401, clear stored credentials and redirect to /login
+      if (status === 401) {
+        localStorage.removeItem('artifex_token')
+        localStorage.removeItem('artifex_user')
+        delete api.defaults.headers.common['Authorization']
+        // Only redirect if not already on the login page to avoid loops
+        if (!window.location.pathname.startsWith('/login')) {
+          window.location.href = '/login'
+        }
+      }
+
       const detail = data?.detail
       const message = Array.isArray(detail)
         ? detail.map((d: { msg?: string }) => d.msg).join('; ')

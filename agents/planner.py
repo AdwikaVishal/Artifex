@@ -166,6 +166,7 @@ class PlannerAgent(BaseAgent):
             try:
                 import os as _os  # noqa: PLC0415
                 from temporalio.client import Client as _TemporalClient  # noqa: PLC0415
+                from temporalio.exceptions import WorkflowAlreadyStartedError as _WASError  # noqa: PLC0415
                 temporal_host = _os.getenv("TEMPORAL_HOST", "temporal:7233")
                 temporal_ns   = _os.getenv("TEMPORAL_NAMESPACE", "default")
                 task_queue    = _os.getenv("TEMPORAL_TASK_QUEUE", "artifex-queue")
@@ -178,20 +179,19 @@ class PlannerAgent(BaseAgent):
                 )
                 self._log.info("planner.emergent_workflow_started",
                                workflow_id=emergent_workflow_id)
+            except _WASError:  # idempotent – workflow already running
+                self._log.info("planner.emergent_workflow_already_running",
+                               workflow_id=emergent_workflow_id)
             except Exception as exc:  # noqa: BLE001
-                if "already" in str(exc).lower() or "exists" in str(exc).lower():
-                    self._log.info("planner.emergent_workflow_already_running",
-                                   workflow_id=emergent_workflow_id)
+                self._log.exception("planner.emergent_start_error", error=str(exc))
+                # Fall through to deterministic planning on error
+                plan = await self._generate_plan(goal)
+                await self.log_event(f"Planning (fallback): {goal[:60]}", "warning")
+                if reply_to:
+                    await self.reply(reply_to, {"plan": plan, "workflow_id": workflow_id})
                 else:
-                    self._log.exception("planner.emergent_start_error", error=str(exc))
-                    # Fall through to deterministic planning on error
-                    plan = await self._generate_plan(goal)
-                    await self.log_event(f"Planning (fallback): {goal[:60]}", "warning")
-                    if reply_to:
-                        await self.reply(reply_to, {"plan": plan, "workflow_id": workflow_id})
-                    else:
-                        await self._dispatch_first_task(plan, workflow_id)
-                    return
+                    await self._dispatch_first_task(plan, workflow_id)
+                return
 
             if reply_to:
                 await self.reply(reply_to, {
@@ -299,7 +299,8 @@ class PlannerAgent(BaseAgent):
             self._log.info("planner.started_placement_workflow",
                            workflow_id=workflow_id, child_id=child_id)
         except Exception as exc:
-            if "already" in str(exc).lower() or "exists" in str(exc).lower():
+            from temporalio.exceptions import WorkflowAlreadyStartedError as _WASError  # noqa: PLC0415
+            if isinstance(exc, _WASError):
                 self._log.info("planner.placement_workflow_already_running",
                                workflow_id=workflow_id)
             else:
