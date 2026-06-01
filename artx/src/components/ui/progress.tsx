@@ -34,7 +34,12 @@ export function Progress({ value, className, variant = 'default', size = 'md', s
 }
 
 interface AnimatedProgressStepProps {
-  stages: { name: string; label: string; status: 'pending' | 'in_progress' | 'completed' | 'failed' }[]
+  stages: Array<{
+    name?: string
+    label?: string
+    status: 'pending' | 'in_progress' | 'completed' | 'failed' | string
+    stage?: string
+  }>
   currentStage?: string
 }
 
@@ -51,12 +56,14 @@ export function AnimatedProgressSteps({ stages, currentStage }: AnimatedProgress
       </div>
       <div className="relative flex justify-between">
         {stages.map((stage, i) => {
+          const name = stage.name || stage.stage || `step-${i}`
+          const label = stage.label || getStageLabel(stage.stage || name)
           const isCompleted = stage.status === 'completed'
-          const isActive = stage.status === 'in_progress' || stage.name === currentStage
+          const isActive = stage.status === 'in_progress' || name === currentStage
           const isFailed = stage.status === 'failed'
 
           return (
-            <div key={stage.name} className="flex flex-col items-center gap-2">
+            <div key={name} className="flex flex-col items-center gap-2">
               <div
                 className={cn(
                   'w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all duration-300',

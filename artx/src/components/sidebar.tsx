@@ -6,6 +6,7 @@ import {
   GitBranch,
   CheckSquare,
   Home,
+  Building2,
   MessageSquare,
   Activity,
   ChevronLeft,
@@ -19,6 +20,7 @@ const navItems = [
   { icon: GitBranch, label: 'Workflows', path: '/workflow' },
   { icon: CheckSquare, label: 'Approvals', path: '/approvals' },
   { icon: Home, label: 'Placements', path: '/placements' },
+  { icon: Building2, label: 'Families', path: '/families' },
   { icon: MessageSquare, label: 'AI Assistant', path: '/chat' },
   { icon: Activity, label: 'Monitoring', path: '/monitoring' },
 ]

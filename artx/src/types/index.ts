@@ -2,6 +2,8 @@ export interface ReferralSubmission {
   child_id: string
   age: number
   gender: string
+  special_needs: boolean
+  languages: string
   medical_needs: string
   behavioral_support: string
   sibling_group: boolean
@@ -41,27 +43,49 @@ export interface WorkflowNestedStatus {
   updated_at?: string
 }
 
+export interface TopMatch {
+  family: Record<string, unknown>
+  match_score: number
+  blended_score: number
+  confidence_score: number
+  risk_probability: number
+  capacity: number
+  explanation: string
+}
+
 export interface WorkflowStatus {
   workflow_id: string
-  child_id: string
   status: string
-  current_stage: string
-  stages: WorkflowStage[]
-  risk_score?: number
-  recommended_family?: string
+  active: boolean
+  child_id?: string
+  family_id?: string
+  recommended_family?: string | Record<string, unknown>
+  match_score?: number | null
+  confidence_score?: number | null
+  risk_score?: number | null
+  current_stage?: string
+  progress?: number
+  stages?: WorkflowStage[]
+  timeline?: WorkflowStage[]
+  feature_importance?: Array<Record<string, unknown>> | null
+  top_matches?: TopMatch[] | null
+  capacity?: number | null
   metadata?: Record<string, unknown>
-  created_at: string
-  updated_at: string
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 export interface WorkflowStage {
-  name: string
-  label: string
-  status: 'pending' | 'in_progress' | 'completed' | 'failed'
+  stage: string
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | string
+  data?: Record<string, unknown> | null
+  timestamp?: string
   started_at?: string
   completed_at?: string
   duration?: string
   details?: string
+  name?: string
+  label?: string
 }
 
 export interface PendingApproval {
@@ -92,16 +116,24 @@ export interface Placement {
   id?: string
   workflow_id?: string
   child_id?: string
+  family_id?: string
+  recommended_family?: string | Record<string, unknown>
   foster_family_name?: string
+  family?: Record<string, unknown>
   location?: string
   emergency_level?: string
   risk_score?: number
   status?: string
+  current_stage?: string
+  progress?: number
   placement_date?: string
   match_score?: number
+  confidence_score?: number
   capacity?: number
   siblings_accommodated?: boolean
   special_needs_met?: string[]
+  top_matches?: TopMatch[]
+  feature_importance?: Array<{ feature: string; importance: number }> | any[]
 }
 
 export interface HealthStatus {
@@ -188,6 +220,20 @@ export interface DashboardMetrics {
   emergency_change: number
 }
 
+export interface DashboardEventsResponse {
+  events: WorkflowEvent[]
+}
+
+export interface AgentStatusMap {
+  agents: Record<string, AgentStatusItem>
+}
+
+export interface AgentStatusItem {
+  name: string
+  status: string
+  last_heartbeat_age_s: number | null
+}
+
 export interface WorkflowEvent {
   id: string
   type: string
@@ -208,4 +254,54 @@ export interface RiskDistribution {
 export interface PendingApprovalsResponse {
   approvals: PendingApproval[]
   count: number
+}
+
+export interface Family {
+  id: number
+  family_id: string
+  name: string
+  location: string
+  capacity: number
+  available_capacity: number
+  experience: string
+  specializations: string
+  languages: string
+  special_needs_trained: boolean
+  accepts_siblings: boolean
+  emergency_available: boolean
+  max_age: number
+  can_take_siblings: boolean
+  has_animals: boolean
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface FamilyCreate {
+  name: string
+  location?: string
+  capacity?: number
+  experience?: string
+  specializations?: string
+  languages?: string
+  special_needs_trained?: boolean
+  accepts_siblings?: boolean
+  emergency_available?: boolean
+  max_age?: number
+  can_take_siblings?: boolean
+  has_animals?: boolean
+}
+
+export interface FamilyUpdate {
+  name?: string
+  location?: string
+  capacity?: number
+  experience?: string
+  specializations?: string
+  languages?: string
+  special_needs_trained?: boolean
+  accepts_siblings?: boolean
+  emergency_available?: boolean
+  max_age?: number
+  can_take_siblings?: boolean
+  has_animals?: boolean
 }

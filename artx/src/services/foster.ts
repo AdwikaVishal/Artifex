@@ -3,41 +3,56 @@ import type {
   ReferralSubmission,
   ReferralResponse,
   WorkflowStatus,
-  WorkflowNestedStatus,
   PendingApproval,
   PendingApprovalsResponse,
   ApproveRequest,
   ApproveResponse,
   Placement,
   HealthStatus,
-  AgentStatus,
   DashboardMetrics,
   RiskDistribution,
   WorkflowEvent,
+  DashboardEventsResponse,
+  AgentStatusMap,
+  Family,
+  FamilyCreate,
+  FamilyUpdate,
 } from '@/types'
 
 export function normalizeWorkflowId(input: unknown): string {
   if (typeof input !== 'string') return ''
   const trimmed = input.trim()
 
-  if (/^foster-CHILD-\d+$/.test(trimmed)) {
-    return trimmed
-  }
+  // If already a foster-* id, keep as-is
+  if (/^foster-/i.test(trimmed)) return trimmed
 
-  if (/^CHILD-\d+$/i.test(trimmed)) {
-    const normalized = `foster-${trimmed.toUpperCase()}`
+  // CHILD-123 or CHILD-123 (case-insensitive) -> foster-123
+  const mChild = trimmed.match(/^CHILD-(\d+)$/i)
+  if (mChild) {
+    const normalized = `foster-${mChild[1]}`
     console.log(`[foster] normalized "${trimmed}" -> "${normalized}"`)
     return normalized
   }
 
-  const digits = trimmed.match(/\d+/)
-  if (digits) {
-    const normalized = `foster-CHILD-${digits[0]}`
+  // CH-123 -> foster-123
+  const mCh = trimmed.match(/^CH-(\d+)$/i)
+  if (mCh) {
+    const normalized = `foster-${mCh[1]}`
+    console.log(`[foster] normalized "${trimmed}" -> "${normalized}"`)
+    return normalized
+  }
+
+  // Pure digits -> foster-<digits>
+  if (/^\d+$/.test(trimmed)) {
+    const normalized = `foster-${trimmed}`
     console.log(`[foster] normalized numeric input "${trimmed}" -> "${normalized}"`)
     return normalized
   }
 
-  return trimmed
+  // Default: prefix with foster- preserving non-numeric child ids (e.g., CABC123)
+  const normalized = `foster-${trimmed}`
+  console.log(`[foster] normalized default "${trimmed}" -> "${normalized}"`)
+  return normalized
 }
 
 export async function submitReferral(data: ReferralSubmission): Promise<ReferralResponse> {
@@ -45,6 +60,8 @@ export async function submitReferral(data: ReferralSubmission): Promise<Referral
     child_id: data.child_id,
     age: data.age,
     gender: data.gender,
+    special_needs: data.special_needs,
+    languages: data.languages,
     medical_needs: data.medical_needs,
     behavioral_support: data.behavioral_support,
     sibling_group: data.sibling_group,
@@ -137,6 +154,57 @@ export async function getPlacements(): Promise<Placement[]> {
   return placements
 }
 
+// ── Timeline → WorkflowStage converter ──────────────────────────────────────
+
+const STAGE_NAMES = [
+  'Intake',
+  'Eligibility Validation',
+  'ML Inference',
+  'Placement Matching',
+  'Recommendation Generated',
+  'Approval Pending',
+  'Placement Approved',
+  'Placement Active',
+  'Monitoring',
+]
+
+function buildStagesFromTimeline(
+  timeline: any[],
+  currentStage: string,
+): WorkflowStage[] {
+  return STAGE_NAMES.map((name) => {
+    const events = (timeline || []).filter((e: any) => {
+      const eStage = (e.stage || e.name || '').toLowerCase()
+      return eStage === name.toLowerCase()
+    })
+    const completedEvent = events.find(
+      (e: any) => e.status === 'completed' || e.status === 'active',
+    )
+    const startEvent = events[0]
+    const isCurrent =
+      currentStage &&
+      name.toLowerCase() === currentStage.toLowerCase()
+
+    let status: WorkflowStage['status'] = 'pending'
+    if (completedEvent) {
+      status = 'completed'
+    } else if (isCurrent || events.length > 0) {
+      status = 'in_progress'
+    }
+
+    return {
+      name: name.toLowerCase().replace(/\s+/g, '_'),
+      label: name,
+      status,
+      started_at: startEvent?.timestamp || undefined,
+      completed_at: completedEvent?.timestamp || undefined,
+      details: startEvent?.data
+        ? JSON.stringify(startEvent.data).slice(0, 120)
+        : undefined,
+    }
+  })
+}
+
 export async function getWorkflowStatus(workflowId: string): Promise<WorkflowStatus> {
   const raw = workflowId
   const normalized = normalizeWorkflowId(workflowId)
@@ -150,31 +218,36 @@ export async function getWorkflowStatus(workflowId: string): Promise<WorkflowSta
   }
 
   console.log(`[foster] fetching workflow status for: "${normalized}"`)
-  const res = await api.get<{ workflow_id: string; status: WorkflowNestedStatus | string }>(`/foster/status/${encodeURIComponent(normalized)}`)
+  const res = await api.get<any>(`/foster/status/${encodeURIComponent(normalized)}`)
   console.log(`[foster] workflow status response for "${normalized}":`, res.data)
 
-  const rawData = res.data
+  const d = res.data || {}
+  const now = new Date().toISOString()
+  const timeline = d.timeline || []
 
-  if (rawData.status && typeof rawData.status === 'object') {
-    const nested = rawData.status as WorkflowNestedStatus
-    const now = new Date().toISOString()
-    const normalizedStatus: WorkflowStatus = {
-      workflow_id: rawData.workflow_id || nested.workflow_id || normalized,
-      child_id: nested.child_id || '',
-      status: nested.status || 'unknown',
-      current_stage: nested.current_stage || nested.stage || '',
-      stages: nested.stages || [],
-      risk_score: nested.risk_score,
-      recommended_family: nested.recommended_family,
-      metadata: nested.metadata,
-      created_at: nested.created_at || now,
-      updated_at: nested.updated_at || now,
-    }
-    console.log(`[foster] normalized workflow status:`, normalizedStatus)
-    return normalizedStatus
+  const normalizedStatus: WorkflowStatus = {
+    workflow_id: d.workflow_id || normalized,
+    child_id: d.child_id || '',
+    family_id: d.family_id || '',
+    status: d.status || 'unknown',
+    current_stage: d.current_stage || '',
+    stages: buildStagesFromTimeline(timeline, d.current_stage || ''),
+    risk_score: d.risk_score ?? null,
+    match_score: d.match_score ?? null,
+    confidence_score: d.confidence_score ?? null,
+    recommended_family: d.recommended_family || null,
+    capacity: d.capacity ?? null,
+    progress: d.progress ?? 0,
+    timeline,
+    feature_importance: d.feature_importance || null,
+    top_matches: d.top_matches || null,
+    active: d.active ?? true,
+    metadata: d.metadata || {},
+    created_at: d.created_at || now,
+    updated_at: d.updated_at || now,
   }
-
-  return rawData as unknown as WorkflowStatus
+  console.log(`[foster] normalized workflow status:`, normalizedStatus)
+  return normalizedStatus
 }
 
 export async function getAgentStatus(agentName: string): Promise<AgentStatus> {
@@ -211,39 +284,102 @@ export async function getHealthCheck(): Promise<boolean> {
   }
 }
 
-export function getMockMetrics(): DashboardMetrics {
+// ── Families CRUD ─────────────────────────────────────────────────────────
+
+export interface FamiliesResponse {
+  families: Family[]
+  count: number
+}
+
+export async function getFamilies(): Promise<Family[]> {
+  console.log('[foster] fetching families...')
+  const res = await api.get<FamiliesResponse | Family[]>('/families')
+  if (Array.isArray(res.data)) {
+    return res.data as Family[]
+  }
+  const wrapper = res.data as FamiliesResponse
+  if (wrapper && Array.isArray(wrapper.families)) {
+    return wrapper.families
+  }
+  return []
+}
+
+export async function getFamily(familyId: string): Promise<Family> {
+  const res = await api.get<Family>(`/families/${encodeURIComponent(familyId)}`)
+  return res.data
+}
+
+export async function createFamily(data: FamilyCreate): Promise<Family> {
+  const res = await api.post<Family>('/families', data)
+  return res.data
+}
+
+export async function updateFamily(familyId: string, data: FamilyUpdate): Promise<Family> {
+  const res = await api.put<Family>(`/families/${encodeURIComponent(familyId)}`, data)
+  return res.data
+}
+
+export async function deleteFamily(familyId: string): Promise<void> {
+  await api.delete(`/families/${encodeURIComponent(familyId)}`)
+}
+
+// --- WebSocket streaming helper for workflow updates ---------------------
+export function subscribeWorkflowStream(
+  workflowId: string,
+  onMessage: (msg: any) => void,
+  onOpen?: () => void,
+  onClose?: () => void,
+): { close: () => void } {
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const host = window.location.host
+  const url = `${protocol}://${host}/workflow/${encodeURIComponent(workflowId)}/stream`
+
+  let ws: WebSocket | null = null
+  let shouldClose = false
+
+  function connect() {
+    ws = new WebSocket(url)
+    ws.onopen = () => { onOpen && onOpen() }
+    ws.onmessage = (ev) => {
+      try { const data = JSON.parse(ev.data); onMessage(data) } catch (err) { console.warn('[foster.ws] parse error', err) }
+    }
+    ws.onclose = () => {
+      if (shouldClose) { onClose && onClose(); return }
+      // reconnect with backoff
+      setTimeout(() => connect(), 1000)
+    }
+    ws.onerror = (e) => { console.warn('[foster.ws] error', e) }
+  }
+
+  connect()
+
   return {
-    active_workflows: 24,
-    pending_approvals: 8,
-    placements_matched: 156,
-    emergency_referrals: 3,
-    workflows_change: 12,
-    approvals_change: -2,
-    placements_change: 8,
-    emergency_change: 0,
+    close: () => {
+      shouldClose = true
+      try { ws?.close() } catch (_) {}
+    },
   }
 }
 
-export function getMockRiskDistribution(): RiskDistribution {
-  return { low: 45, medium: 30, high: 18, critical: 7 }
+export async function getDashboardMetrics(): Promise<DashboardMetrics> {
+  const res = await api.get<DashboardMetrics>('/dashboard/metrics')
+  return res.data
 }
 
-export function getMockEvents(): WorkflowEvent[] {
-  return [
-    { id: '1', type: 'status_change', workflow_id: 'WF-2024-001', workflow_stage: 'matching', child_id: 'CH-101', message: 'Matching algorithm initiated for child CH-101', timestamp: new Date(Date.now() - 30000).toISOString() },
-    { id: '2', type: 'approval', workflow_id: 'WF-2024-002', workflow_stage: 'approval_pending', child_id: 'CH-102', message: 'Approval request sent to supervisor', timestamp: new Date(Date.now() - 120000).toISOString() },
-    { id: '3', type: 'placement', workflow_id: 'WF-2024-003', workflow_stage: 'placement_assigned', child_id: 'CH-103', message: 'Placement confirmed with Johnson family', timestamp: new Date(Date.now() - 300000).toISOString() },
-    { id: '4', type: 'alert', workflow_id: 'WF-2024-004', workflow_stage: 'risk_analysis', child_id: 'CH-104', message: 'High risk flags detected - manual review required', timestamp: new Date(Date.now() - 600000).toISOString() },
-    { id: '5', type: 'status_change', workflow_id: 'WF-2024-005', workflow_stage: 'submitted', child_id: 'CH-105', message: 'New referral submitted for CH-105', timestamp: new Date(Date.now() - 1800000).toISOString() },
-  ]
+export async function getRiskDistribution(): Promise<RiskDistribution> {
+  const res = await api.get<RiskDistribution>('/dashboard/risk-distribution')
+  return res.data
 }
 
-export function getMockAgentStatuses(): AgentStatus[] {
-  return [
-    { name: 'matching-agent', status: 'active', task: 'Matching CH-104 with foster families', last_heartbeat: new Date(Date.now() - 5000).toISOString(), workflows_processed: 142 },
-    { name: 'risk-analyzer', status: 'active', task: 'Analyzing risk profile for WF-2024-006', last_heartbeat: new Date(Date.now() - 8000).toISOString(), workflows_processed: 98 },
-    { name: 'approval-coordinator', status: 'busy', task: 'Processing supervisor approval for WF-2024-002', last_heartbeat: new Date(Date.now() - 15000).toISOString(), workflows_processed: 56 },
-    { name: 'notification-agent', status: 'active', task: 'Idle', last_heartbeat: new Date(Date.now() - 3000).toISOString(), workflows_processed: 210 },
-    { name: 'placement-optimizer', status: 'active', task: 'Optimizing placement for CH-101', last_heartbeat: new Date(Date.now() - 12000).toISOString(), workflows_processed: 73 },
-  ]
+export async function getDashboardEvents(): Promise<WorkflowEvent[]> {
+  const res = await api.get<DashboardEventsResponse | WorkflowEvent[]>('/dashboard/events')
+  const data = res.data
+  if (Array.isArray(data)) return data as WorkflowEvent[]
+  if (data && 'events' in data) return data.events || []
+  return []
+}
+
+export async function getAgentStatuses(): Promise<AgentStatusMap> {
+  const res = await api.get<AgentStatusMap>('/agent/status')
+  return res.data
 }

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from datetime import timedelta
 from typing import Any
 
@@ -404,7 +403,6 @@ async def spawn_specialist_activity(
         # Send shutdown signal (agent will stop after answering)
         try:
             import nats as nats_lib  # noqa: PLC0415
-            import json as _j  # noqa: PLC0415
             nats_url = os.getenv("NATS_URL", "nats://nats:4222")
             nc = await nats_lib.connect(nats_url)
             await nc.publish(f"agent.{agent_id}.shutdown", b"{}")
@@ -618,39 +616,63 @@ class TaskWorkerWorkflow:
         return result
 
 # ── Foster care activities ────────────────────────────────────────────────────
-# Simulated family database (replace with a real DB query in production)
-_FAMILIES = [
-    {
-        "family_id": "F1",
-        "name": "The Johnson Family",
-        "location": "123 Main St, Springfield",
-        "max_age": 12,
-        "can_take_siblings": True,
-        "experience": "high",
-        "has_animals": True,
-        "special_needs_trained": True,
-    },
-    {
-        "family_id": "F2",
-        "name": "The Williams Family",
-        "location": "456 Oak Ave, Shelbyville",
-        "max_age": 16,
-        "can_take_siblings": False,
-        "experience": "medium",
-        "has_animals": False,
-        "special_needs_trained": False,
-    },
-    {
-        "family_id": "F3",
-        "name": "The Garcia Family",
-        "location": "789 Pine Rd, Capital City",
-        "max_age": 18,
-        "can_take_siblings": True,
-        "experience": "low",
-        "has_animals": True,
-        "special_needs_trained": True,
-    },
-]
+
+
+@activity.defn(name="load_child_profile_activity")
+async def load_child_profile_activity(child_id: str) -> dict:
+    """Load a child's full profile from PostgreSQL by child_id."""
+    import asyncpg  # noqa: PLC0415
+
+    db_url = _os_mod.getenv(
+        "DATABASE_URL", "postgresql://artifex:artifex123@postgres:5432/placements"
+    )
+    try:
+        conn = await asyncpg.connect(db_url, timeout=3.0)
+        try:
+            row = await conn.fetchrow(
+                "SELECT * FROM children WHERE child_id = $1", child_id
+            )
+            if row is None:
+                logger.warning("load_child_profile.not_found", child_id=child_id)
+                return {}
+            return dict(row)
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.warning("load_child_profile.db_error", child_id=child_id, error=str(exc))
+        return {}
+
+
+async def _load_families_db() -> list[dict]:
+    """Load all available families from PostgreSQL by family_id."""
+    import asyncpg  # noqa: PLC0415
+
+    db_url = _os_mod.getenv(
+        "DATABASE_URL", "postgresql://artifex:artifex123@postgres:5432/placements"
+    )
+    try:
+        conn = await asyncpg.connect(db_url, timeout=3.0)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT f.*,
+                  (f.total_capacity - COALESCE(
+                    (SELECT COUNT(*) FROM active_placements ap WHERE ap.family_id = f.family_id AND ap.status = 'active'), 0
+                  )) AS available_capacity
+                FROM families f
+                WHERE f.active = TRUE
+                  AND (f.total_capacity - COALESCE(
+                    (SELECT COUNT(*) FROM active_placements ap WHERE ap.family_id = f.family_id AND ap.status = 'active'), 0
+                  )) > 0
+                ORDER BY f.name
+                """
+            )
+            return [dict(r) for r in rows]
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.warning("foster.load_families_db_error", error=str(exc))
+        return []
 
 # ── XGBoost risk model (loaded once at worker startup) ────────────────────────
 import json as _json_mod
@@ -729,74 +751,140 @@ def _build_feature_row(child: dict) -> dict:
     return row
 
 
-@activity.defn(name="match_child_activity")
-async def match_child_activity(child: dict) -> dict:
-    """Match a child to the most suitable available family using a scoring algorithm."""
-    age: int            = child.get("age", 10)
-    siblings: int       = child.get("siblings", 0)
-    special_needs: bool = child.get("special_needs", False)
+@activity.defn(name="placement_predict_activity")
+async def placement_predict_activity(child: dict, workflow_id: str) -> dict:
+    """
+    Full ML placement prediction using the placement_recommender engine.
 
-    best_family: dict = {}
-    best_score: int   = -1
-    best_reasons: list[str] = []
+    Delegates to services.placement_recommender.recommend_foster_family(),
+    which loads available families from PostgreSQL, generates pair features,
+    runs ML inference, ranks families, and returns top-N matches.
 
-    for family in _FAMILIES:
-        if age > family["max_age"]:
-            continue
-        if siblings > 0 and not family["can_take_siblings"]:
-            continue
+    IMPORTANT: No heuristic fallback recommendations are allowed. If the
+    model is unavailable or no recommendation can be produced, this activity
+    raises so the workflow can emit an explicit manual-review status.
+    """
+    from services.placement_recommender import recommend_foster_family  # noqa: PLC0415
 
-        score = 0
-        reasons: list[str] = []
+    api_url = os.getenv("API_URL", "http://localhost:8000")
 
-        age_pts = max(0, 40 - (family["max_age"] - age) * 3)
-        score += age_pts
-        reasons.append(f"Age {age} within family's max age {family['max_age']} (+{age_pts} pts)")
+    async def _log_inference(payload: dict, result: dict, model_ver: str | None) -> None:
+        """Fire-and-forget POST to log ML inference to ml_inference_logs."""
+        try:
+            import httpx as _httpx  # noqa: PLC0415
+            async with _httpx.AsyncClient(timeout=3.0) as _client:
+                await _client.post(
+                    f"{api_url}/foster/internal/ml_inference_log",
+                    json={
+                        "workflow_id": workflow_id,
+                        "child_id": child.get("child_id"),
+                        "payload": payload,
+                        "result": result,
+                        "model_version": model_ver,
+                    },
+                )
+        except Exception:
+            pass
 
-        if siblings > 0 and family["can_take_siblings"]:
-            score += 20
-            reasons.append(f"Family accepts sibling groups (+20 pts)")
-
-        if special_needs and family["special_needs_trained"]:
-            score += 20
-            reasons.append("Family trained for special needs (+20 pts)")
-        elif special_needs and not family["special_needs_trained"]:
-            reasons.append("Family NOT trained for special needs (no bonus)")
-
-        exp_map = {"high": 20, "medium": 10, "low": 5}
-        exp_pts = exp_map.get(family["experience"], 0)
-        score += exp_pts
-        reasons.append(f"Experience level '{family['experience']}' (+{exp_pts} pts)")
-
-        if score > best_score:
-            best_score   = score
-            best_family  = family
-            best_reasons = reasons
-
-    if not best_family:
-        best_family = {
-            "family_id": "MANUAL_REVIEW",
-            "name": "Manual Review Required",
-            "message": "No suitable family found – escalated to supervisor",
-        }
-        best_reasons = ["No family met the minimum criteria for this child's profile"]
-
-    explanation = " | ".join(best_reasons)
+    result = await recommend_foster_family(child, top_n=5)
+    if not result or not result.get("recommended_family"):
+        raise RuntimeError("No recommendation could be produced (no families or model failure).")
 
     logger.info(
-        "foster.match_child",
+        "placement_predict_activity.recommendation",
+        workflow_id=workflow_id,
         child_id=child.get("child_id"),
-        family_id=best_family.get("family_id"),
-        score=best_score,
-        explanation=explanation,
+        family_id=result["recommended_family"].get("family_id"),
+        match_score=result.get("match_score"),
+        confidence=result.get("confidence_score"),
+        risk_score=result.get("risk_score"),
+        top_matches=len(result.get("top_matches", [])),
     )
-    return {
-        "family":      best_family,
-        "score":       best_score,
-        "explanation": explanation,
+    ret = {
+        "recommended_family": result["recommended_family"],
+        "match_score": result.get("match_score", 0),
+        "confidence": result.get("confidence_score", 0),
+        "risk_score": result.get("risk_score", 0),
+        "feature_importance": result.get("feature_importance", []),
+        "top_matches": result.get("top_matches", []),
+        "explanation": result.get("explanation", ""),
+        "model_version": result.get("model_version", "xgboost-v1"),
     }
+    await _log_inference(child, ret, ret.get("model_version"))
+
+    # Publish live event
+    try:
+        import json as _json  # noqa: PLC0415
+        import nats as nats_lib  # noqa: PLC0415
+        _nc = await nats_lib.connect(os.getenv("NATS_URL", "nats://localhost:4222"))
+        await _nc.publish(
+            "events.live.ml_completed",
+            _json.dumps({
+                "event": "ml_completed",
+                "child_id": child.get("child_id"),
+                "workflow_id": workflow_id,
+                "recommended_family": ret.get("recommended_family", {}).get("name"),
+                "match_score": ret.get("match_score"),
+                "risk_score": ret.get("risk_score"),
+                "confidence": ret.get("confidence"),
+                "model_version": ret.get("model_version"),
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+            }).encode(),
+        )
+        await _nc.drain()
+    except Exception:  # noqa: BLE001
+        pass
+    return ret
 
 
+
+
+@activity.defn(name="record_workflow_event_activity")
+async def record_workflow_event_activity(
+    workflow_id: str, stage: str, status: str, data: dict | None = None
+) -> None:
+    """
+    Persist a workflow event to the API's HTTP endpoint, which writes to
+    the workflow_events and workflow_status tables.
+    """
+    import httpx  # noqa: PLC0415
+
+    api_url = os.getenv("API_URL", "http://localhost:8000")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{api_url}/foster/internal/workflow_event",
+                json={
+                    "workflow_id": workflow_id,
+                    "stage": stage,
+                    "status": status,
+                    "data": data or {},
+                },
+            )
+    except Exception:  # noqa: BLE001
+        # Fallback: try to publish via NATS
+        try:
+            import json as _json  # noqa: PLC0415
+            import nats as nats_lib  # noqa: PLC0415
+
+            nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
+            nc = await nats_lib.connect(nats_url)
+            await nc.publish(
+                "foster.workflow_events",
+                _json.dumps({
+                    "workflow_id": workflow_id,
+                    "stage": stage,
+                    "status": status,
+                    "data": data or {},
+                }).encode(),
+            )
+            await nc.drain()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "record_workflow_event.failed",
+                workflow_id=workflow_id,
+                stage=stage,
+            )
 
 
 @activity.defn(name="publish_match_activity")
@@ -810,7 +898,8 @@ async def publish_match_activity(placement: dict) -> None:
     import nats as nats_lib
 
     child_id = placement.get("child_id", "unknown")
-    nats_url = os.getenv("NATS_URL", "nats://nats:4222")
+    # Use same NATS URL as the API for local dev compatibility
+    nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
 
     try:
         nc = await nats_lib.connect(nats_url)
@@ -827,43 +916,120 @@ async def publish_match_activity(placement: dict) -> None:
                      child_id=child_id, error=str(exc))
 
 
+async def _fetch_checkin_trends(child_id: str) -> dict:
+    """
+    Query check_ins for this child and compute trend features.
+
+    Returns:
+        mood_trend:      slope of mood scores over last 5 check-ins (−2..+2)
+        incident_rate:   fraction of recent check-ins with incidents (0..1)
+        mood_volatility: std dev of mood scores, normalized (0..1)
+        checkin_count:   total check-ins found
+    """
+    import asyncpg  # noqa: PLC0415
+
+    db_url = _os_mod.getenv(
+        "DATABASE_URL", "postgresql://artifex:artifex123@postgres:5432/placements"
+    )
+    try:
+        conn = await asyncpg.connect(db_url, timeout=3.0)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT mood_score, incident_reported, timestamp
+                FROM check_ins
+                WHERE child_id = $1
+                ORDER BY timestamp DESC
+                LIMIT 10
+                """,
+                child_id,
+            )
+            if not rows or len(rows) < 2:
+                return {"mood_trend": 0.0, "incident_rate": 0.0, "mood_volatility": 0.0, "checkin_count": len(rows) if rows else 0}
+
+            scores = [r["mood_score"] for r in rows]
+            incidents = [r["incident_reported"] for r in rows]
+            n = len(scores)
+
+            # Mood trend: slope of scores over check-in index (last 5)
+            recent = scores[: min(5, n)]
+            if len(recent) >= 2:
+                xs = list(range(len(recent)))
+                mean_x = sum(xs) / len(xs)
+                mean_y = sum(recent) / len(recent)
+                num = sum((xs[i] - mean_x) * (recent[i] - mean_y) for i in range(len(recent)))
+                den = sum((x - mean_x) ** 2 for x in xs)
+                slope = num / den if den != 0 else 0.0
+                # Normalise slope to −2..+2 range (each check-in step, max change 4)
+                mood_trend = max(-2.0, min(2.0, slope))
+            else:
+                mood_trend = 0.0
+
+            # Incident rate (last 5 check-ins)
+            incident_rate = sum(incidents[:5]) / min(5, n) if n > 0 else 0.0
+
+            # Mood volatility (normalised std dev of last 5 scores)
+            recent_scores = scores[: min(5, n)]
+            if len(recent_scores) >= 3:
+                mean_s = sum(recent_scores) / len(recent_scores)
+                variance = sum((s - mean_s) ** 2 for s in recent_scores) / len(recent_scores)
+                # std dev ∼0..2 for 1–5 scale, normalise to 0..1
+                mood_volatility = min(1.0, (variance ** 0.5) / 2.0)
+            else:
+                mood_volatility = 0.0
+
+            return {
+                "mood_trend": mood_trend,
+                "incident_rate": incident_rate,
+                "mood_volatility": mood_volatility,
+                "checkin_count": n,
+            }
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.warning("foster.checkin_trend_query_error", child_id=child_id, error=str(exc))
+        return {"mood_trend": 0.0, "incident_rate": 0.0, "mood_volatility": 0.0, "checkin_count": 0}
+
+
 @activity.defn(name="compute_risk_activity")
 async def compute_risk_activity(
     child: dict, family: dict, score: int, notes: str, previous_risk: float = 0.0
 ) -> dict:
     """
-    XGBoost-based disruption risk model with cumulative decay.
+    XGBoost-based disruption risk model with check-in trend awareness.
 
-    Uses the trained XGBoost classifier (models/risk_model.pkl) to compute a
-    base disruption probability from child attributes, then blends it with the
-    caseworker check-in score and the previous risk for temporal smoothing.
+    1. Queries check_ins history for the child (mood trend, incidents, volatility).
+    2. Computes a base disruption probability from child attributes via XGBoost.
+    3. Blends the check-in score into the base.
+    4. Computes a trend risk from check-in patterns.
+    5. Smooths with previous risk.
 
-    Formula: new_risk = previous_risk * 0.7 + blended_base * 0.3
+    Formula: new_risk = previous_risk * 0.5 + base_risk * 0.3 + trend_risk * 0.2
 
     Falls back to the rule-based heuristic if the model is unavailable.
     Returns {"risk": float, "explanation": str}.
     """
     import pandas as pd
 
+    child_id = child.get("child_id", "")
     base_risk: float
 
+    # ── Query check-in trends ─────────────────────────────────────────────────
+    trends = await _fetch_checkin_trends(child_id)
+
+    # ── XGBoost / rule-based base risk ────────────────────────────────────────
     if _risk_model is not None and _feature_columns:
-        # ── XGBoost inference ─────────────────────────────────────────────────
-        # _build_feature_row already zeros all _feature_columns and sets the
-        # correct one-hot column, so we just need to enforce column order.
         row = _build_feature_row(child)
         features_df = pd.DataFrame([row], columns=_feature_columns)
-        disruption_prob = float(_risk_model.predict_proba(features_df)[0][1])  # P(disrupted)
+        disruption_prob = float(_risk_model.predict_proba(features_df)[0][1])
 
-        # Blend with check-in score: score 1→+0.30, score 5→-0.30
         if score:
-            score_adjustment = (5 - score) * 0.075   # range −0.30 … +0.30
+            score_adjustment = (5 - score) * 0.075
             disruption_prob = min(max(disruption_prob + score_adjustment, 0.0), 1.0)
 
         base_risk = disruption_prob * 100.0
         model_tag = "xgboost"
     else:
-        # ── Rule-based fallback ───────────────────────────────────────────────
         base_risk = (5 - score) * 15.0
         notes_lower = notes.lower()
         if any(w in notes_lower for w in ("nightmare", "acting out", "aggressive", "refusing")):
@@ -881,21 +1047,62 @@ async def compute_risk_activity(
         base_risk = min(max(base_risk, 0.0), 100.0)
         model_tag = "rule-based"
 
-    # ── Temporal smoothing ────────────────────────────────────────────────────
-    new_risk = previous_risk * 0.7 + base_risk * 0.3
+    # ── Trend risk from check-in history ──────────────────────────────────────
+    trend_risk = 50.0  # neutral starting point
+    if trends["checkin_count"] >= 2:
+        # Declining mood increases risk
+        trend_risk -= trends["mood_trend"] * 8.0  # each point of downward slope → +8 risk
+        # Incidents add risk
+        trend_risk += trends["incident_rate"] * 25.0
+        # High volatility increases risk
+        trend_risk += trends["mood_volatility"] * 15.0
+        trend_risk = min(max(trend_risk, 0.0), 100.0)
+
+    # ── Blend with temporal smoothing ─────────────────────────────────────────
+    new_risk = previous_risk * 0.5 + base_risk * 0.3 + trend_risk * 0.2
     new_risk = min(max(new_risk, 0.0), 100.0)
 
-    explanation = (
-        f"[{model_tag}] Score {score}/5 → base {base_risk:.0f}. "
-        f"Previous {previous_risk:.0f} → new {new_risk:.0f}. "
-        f"Notes: {notes[:60]}"
-    )
+    explanation_parts = [
+        f"[{model_tag}] Score {score}/5 → base {base_risk:.0f}.",
+        f"Trend: mood_slope={trends['mood_trend']:+.2f} incidents={trends['incident_rate']:.0%} "
+        f"volatility={trends['mood_volatility']:.2f} → trend_risk {trend_risk:.0f}.",
+        f"Previous {previous_risk:.0f} → new {new_risk:.0f}.",
+    ]
+    if trends["checkin_count"] == 0:
+        explanation_parts.insert(1, "No check-in history yet.")
+
+    explanation = " ".join(explanation_parts)
+
+    # Publish live event if risk increased significantly
+    if new_risk > previous_risk + 10 and child_id:
+        try:
+            import json as _json  # noqa: PLC0415
+            import nats as nats_lib  # noqa: PLC0415
+            _nc = await nats_lib.connect(os.getenv("NATS_URL", "nats://localhost:4222"))
+            await _nc.publish(
+                "events.live.risk_increased",
+                _json.dumps({
+                    "event": "risk_increased",
+                    "child_id": child_id,
+                    "previous_risk": round(previous_risk, 1),
+                    "new_risk": round(new_risk, 1),
+                    "delta": round(new_risk - previous_risk, 1),
+                    "trend": trends,
+                    "explanation": explanation[:200],
+                    "timestamp": __import__("datetime").datetime.now().isoformat(),
+                }).encode(),
+            )
+            await _nc.drain()
+        except Exception:  # noqa: BLE001
+            pass
+
     logger.info(
         "foster.compute_risk",
-        child_id=child.get("child_id"),
+        child_id=child_id,
         score=score,
         risk=new_risk,
         model=model_tag,
+        trend=trends,
         explanation=explanation,
     )
     return {"risk": new_risk, "explanation": explanation}
@@ -977,8 +1184,29 @@ async def send_alert_activity(
         consortium_confidence=conf,
     )
 
-    import nats as nats_lib
+    import nats as nats_lib  # noqa: PLC0415
     nats_url = _os.getenv("NATS_URL", "nats://nats:4222")
+
+    # Publish case_escalated live event
+    try:
+        _nc = await nats_lib.connect(nats_url)
+        await _nc.publish(
+            "events.live.case_escalated",
+            _json.dumps({
+                "event": "case_escalated",
+                "child_id": child_id,
+                "family_id": family_id,
+                "family_name": family_name,
+                "risk_score": risk,
+                "notes": notes[:200],
+                "consortium_confidence": conf,
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+            }).encode(),
+        )
+        await _nc.drain()
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         nc = await nats_lib.connect(nats_url)
         await nc.publish(
@@ -1000,7 +1228,6 @@ async def send_alert_activity(
 
 async def main() -> None:
     """Connect to Temporal with retries, then start the worker."""
-    import time
 
     max_attempts = 10
     for attempt in range(1, max_attempts + 1):
@@ -1057,8 +1284,9 @@ async def main() -> None:
             broadcast_executor_activity,
             voting_validator_activity,
             spawn_specialist_activity,
-            match_child_activity,
+            placement_predict_activity,
             publish_match_activity,
+            record_workflow_event_activity,
             compute_risk_activity,
             send_alert_activity,
             announce_task_activity,

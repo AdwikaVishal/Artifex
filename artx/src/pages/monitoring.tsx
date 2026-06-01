@@ -2,28 +2,14 @@ import { useAgentStatuses, useHealth, useDashboardMetrics } from '@/hooks/use-fo
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { StatusBadge } from '@/components/ui/badge'
 import { DataLoader } from '@/components/data-loader'
-import { formatDate } from '@/lib/utils'
 import { motion } from 'framer-motion'
 import {
-  Activity, Database, Server, Bot, Radio, Network, Cpu, BarChart3, RefreshCw, 
+  Activity, Database, Bot, Radio, Network, BarChart3, RefreshCw, 
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar,
 } from 'recharts'
-
-const throughputData = Array.from({ length: 24 }, (_, i) => ({
-  time: `${i}:00`,
-  events: Math.floor(Math.random() * 50) + 10,
-  workflows: Math.floor(Math.random() * 20) + 5,
-}))
-
-const latencyData = Array.from({ length: 12 }, (_, i) => ({
-  time: `${(i * 5).toString().padStart(2, '0')}:00`,
-  api: Math.floor(Math.random() * 200) + 20,
-  nats: Math.floor(Math.random() * 100) + 10,
-  db: Math.floor(Math.random() * 50) + 5,
-}))
 
 function ServiceCard({ name, icon: Icon, status, latency }: { name: string; icon: React.ElementType; status: string; latency?: number }) {
   return (
@@ -51,9 +37,10 @@ function ServiceCard({ name, icon: Icon, status, latency }: { name: string; icon
 }
 
 export default function MonitoringPage() {
-  const { data: agents, isLoading: agentsLoading, error: agentsError } = useAgentStatuses()
+  const { data: agentMap, isLoading: agentsLoading, error: agentsError } = useAgentStatuses()
   const { data: health, isLoading: healthLoading, error: healthError } = useHealth()
   const { data: metrics } = useDashboardMetrics()
+  const agents = agentMap?.agents ? Object.values(agentMap.agents) : []
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
@@ -125,10 +112,10 @@ export default function MonitoringPage() {
             </div>
             <div>
               <p className="text-xs text-muted-foreground">AI Agents</p>
-              <StatusBadge status={agents?.every((a) => a.status === 'active') ? 'healthy' : 'degraded'} />
+              <StatusBadge status={agents.length > 0 && agents.every((a: any) => a.status === 'healthy') ? 'healthy' : 'degraded'} />
             </div>
           </div>
-          <p className="text-xs text-muted-foreground font-mono">{agents?.filter((a) => a.status === 'active').length ?? 0}/{agents?.length ?? 0} active</p>
+          <p className="text-xs text-muted-foreground font-mono">{agents.filter((a: any) => a.status === 'healthy').length ?? 0}/{agents.length ?? 0} active</p>
         </GlassCard>
       </div>
 
@@ -138,29 +125,8 @@ export default function MonitoringPage() {
             <GlassCardTitle>Event Throughput (24h)</GlassCardTitle>
             <BarChart3 size={16} className="text-muted-foreground" />
           </GlassCardHeader>
-          <div className="h-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={throughputData}>
-                <defs>
-                  <linearGradient id="events" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="workflows" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 10 }} interval={3} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 10 }} />
-                <Tooltip
-                  contentStyle={{ background: '#1a1a24', border: '1px solid #2a2a3d', borderRadius: '8px', fontSize: '12px' }}
-                  labelStyle={{ color: '#e8e8f0' }}
-                />
-                <Area type="monotone" dataKey="events" stroke="#6366f1" fill="url(#events)" strokeWidth={2} />
-                <Area type="monotone" dataKey="workflows" stroke="#06b6d4" fill="url(#workflows)" strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
+          <div className="h-48 flex items-center justify-center">
+            <p className="text-sm text-muted-foreground">Throughput data from live events feed</p>
           </div>
         </GlassCard>
 
@@ -169,20 +135,19 @@ export default function MonitoringPage() {
             <GlassCardTitle>Service Latency</GlassCardTitle>
             <Activity size={16} className="text-muted-foreground" />
           </GlassCardHeader>
-          <div className="h-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={latencyData}>
-                <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 10 }} interval={2} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 10 }} />
-                <Tooltip
-                  contentStyle={{ background: '#1a1a24', border: '1px solid #2a2a3d', borderRadius: '8px', fontSize: '12px' }}
-                  labelStyle={{ color: '#e8e8f0' }}
-                />
-                <Bar dataKey="api" fill="#6366f1" radius={[2, 2, 0, 0]} />
-                <Bar dataKey="nats" fill="#06b6d4" radius={[2, 2, 0, 0]} />
-                <Bar dataKey="db" fill="#10b981" radius={[2, 2, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="h-48 flex items-center justify-center">
+            <div className="text-center">
+              <p className="text-sm text-muted-foreground">Service latency from health check</p>
+              {health?.services?.postgres?.latency_ms && (
+                <p className="text-xs text-muted-foreground mt-1">PostgreSQL: {health.services.postgres.latency_ms}ms</p>
+              )}
+              {health?.services?.nats?.latency_ms && (
+                <p className="text-xs text-muted-foreground">NATS: {health.services.nats.latency_ms}ms</p>
+              )}
+              {health?.services?.temporal?.latency_ms && (
+                <p className="text-xs text-muted-foreground">Temporal: {health.services.temporal.latency_ms}ms</p>
+              )}
+            </div>
           </div>
         </GlassCard>
       </div>
@@ -207,7 +172,7 @@ export default function MonitoringPage() {
                 </tr>
               </thead>
               <tbody>
-                {agents?.map((agent) => (
+                {agents.map((agent: any) => (
                   <tr key={agent.name} className="border-b border-border hover:bg-glass transition-colors">
                     <td className="py-3 px-2">
                       <div className="flex items-center gap-2">
@@ -215,10 +180,10 @@ export default function MonitoringPage() {
                         <span className="text-foreground font-medium">{agent.name}</span>
                       </div>
                     </td>
-                    <td className="py-3 px-2"><StatusBadge status={agent.status} /></td>
-                    <td className="py-3 px-2 text-muted-foreground max-w-[200px] truncate">{agent.task}</td>
-                    <td className="py-3 px-2 text-right font-mono text-foreground">{agent.workflows_processed}</td>
-                    <td className="py-3 px-2 text-right text-muted-foreground font-mono text-xs">{formatDate(agent.last_heartbeat)}</td>
+                    <td className="py-3 px-2"><StatusBadge status={agent.status === 'healthy' ? 'active' : agent.status === 'stale' ? 'busy' : 'error'} /></td>
+                    <td className="py-3 px-2 text-muted-foreground max-w-[200px] truncate">-</td>
+                    <td className="py-3 px-2 text-right font-mono text-foreground">-</td>
+                    <td className="py-3 px-2 text-right text-muted-foreground font-mono text-xs">{agent.last_heartbeat_age_s ? `${agent.last_heartbeat_age_s}s ago` : 'N/A'}</td>
                   </tr>
                 ))}
               </tbody>

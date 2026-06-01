@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import api from '@/services/api'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
@@ -9,22 +9,62 @@ import { AnimatedProgressSteps } from '@/components/ui/progress'
 import { DataLoader } from '@/components/data-loader'
 import { Separator } from '@/components/ui/separator'
 import { formatDate, getStageLabel } from '@/lib/utils'
-import { normalizeWorkflowId } from '@/services/foster'
+import { normalizeWorkflowId, subscribeWorkflowStream } from '@/services/foster'
 import { motion } from 'framer-motion'
 import { Search, Clock, AlertCircle, RefreshCw, ArrowLeft } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { WorkflowStatus, WorkflowStage } from '@/types'
 import { useState, useEffect, useCallback } from 'react'
 
-function TimelineView({ stages }: { stages: WorkflowStage[] }) {
+function formatPercent(value?: number | null, decimals = 0): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  const normalized = value <= 1 ? value * 100 : value
+  return `${Number(normalized.toFixed(decimals))}%`
+}
+
+function formatRiskScore(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  const normalized = value <= 1 ? value * 100 : value
+  return `${normalized.toFixed(normalized < 10 ? 2 : 0)}%`
+}
+
+function normalizeTimelineEvents(events: WorkflowStage[]): WorkflowStage[] {
+  return (events || []).map((event, index) => {
+    const stageName = event.stage || event.name || `event-${index}`
+    const label = event.label || getStageLabel(event.stage || event.name || '') || String(stageName)
+    const details = event.details ||
+      (event.data && typeof event.data === 'object'
+        ? (typeof event.data.message === 'string'
+            ? event.data.message
+            : typeof event.data.details === 'string'
+              ? event.data.details
+              : JSON.stringify(event.data))
+        : typeof event.data === 'string'
+          ? event.data
+          : undefined)
+    return {
+      ...event,
+      name: event.name || String(stageName),
+      label,
+      started_at: event.started_at || event.timestamp,
+      details,
+    }
+  })
+}
+
+function TimelineView({ timeline }: { timeline: WorkflowStage[] }) {
+  if (!timeline?.length) {
+    return <p className="text-sm text-muted-foreground">No timeline events are available yet.</p>
+  }
+
   return (
     <div className="space-y-3">
-      {stages.map((stage, i) => {
+      {timeline.map((stage, i) => {
         const isCompleted = stage.status === 'completed'
         const isActive = stage.status === 'in_progress'
         const isFailed = stage.status === 'failed'
         return (
-          <div key={stage.name} className="flex gap-4">
+          <div key={stage.name || `${stage.stage}-${i}`} className="flex gap-4">
             <div className="flex flex-col items-center">
               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all duration-300 ${
                 isCompleted ? 'bg-primary border-primary text-white' :
@@ -34,7 +74,7 @@ function TimelineView({ stages }: { stages: WorkflowStage[] }) {
               }`}>
                 {isCompleted ? '✓' : isFailed ? '✕' : i + 1}
               </div>
-              {i < stages.length - 1 && (
+              {i < timeline.length - 1 && (
                 <div className={`w-0.5 flex-1 mt-1 ${isCompleted ? 'bg-primary/40' : 'bg-border'}`} />
               )}
             </div>
@@ -43,7 +83,7 @@ function TimelineView({ stages }: { stages: WorkflowStage[] }) {
                 <span className={`text-sm font-medium ${
                   isCompleted ? 'text-primary' : isActive ? 'text-foreground' : isFailed ? 'text-destructive' : 'text-muted'
                 }`}>
-                  {getStageLabel(stage.name)}
+                  {stage.label || stage.name}
                 </span>
                 <StatusBadge status={stage.status} />
               </div>
@@ -51,7 +91,6 @@ function TimelineView({ stages }: { stages: WorkflowStage[] }) {
                 <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <Clock size={10} />
                   {formatDate(stage.started_at)}
-                  {stage.duration && ` · ${stage.duration}`}
                 </p>
               )}
               {stage.details && <p className="text-xs text-muted-foreground mt-1">{stage.details}</p>}
@@ -63,24 +102,24 @@ function TimelineView({ stages }: { stages: WorkflowStage[] }) {
   )
 }
 
-function StageMetrics({ stages }: { stages: WorkflowStage[] }) {
-  const total = stages.length
-  const completed = stages.filter((s) => s.status === 'completed').length
-  const failed = stages.filter((s) => s.status === 'failed').length
-  const progress = total > 0 ? (completed / total) * 100 : 0
+function StageMetrics({ timeline, progress }: { timeline: WorkflowStage[]; progress: number }) {
+  const completed = timeline.filter((s) => s.status === 'completed').length
+  const failed = timeline.filter((s) => s.status === 'failed').length
+  const total = timeline.length
+
   return (
     <div className="grid grid-cols-3 gap-4">
       <div className="text-center">
         <p className="text-2xl font-bold text-foreground">{completed}/{total}</p>
-        <p className="text-xs text-muted-foreground mt-1">Stages Complete</p>
+        <p className="text-xs text-muted-foreground mt-1">Events Completed</p>
       </div>
       <div className="text-center">
-        <p className="text-2xl font-bold text-primary">{Math.round(progress)}%</p>
-        <p className="text-xs text-muted-foreground mt-1">Progress</p>
+        <p className="text-2xl font-bold text-primary">{formatPercent(progress)}</p>
+        <p className="text-xs text-muted-foreground mt-1">Workflow Progress</p>
       </div>
       <div className="text-center">
         <p className="text-2xl font-bold text-destructive">{failed}</p>
-        <p className="text-xs text-muted-foreground mt-1">Failed</p>
+        <p className="text-xs text-muted-foreground mt-1">Failures</p>
       </div>
     </div>
   )
@@ -103,6 +142,7 @@ export default function WorkflowTrackingPage() {
 
   const [workflowId, setWorkflowId] = useState(initialNormalized)
   const [searchInput, setSearchInput] = useState(routeWorkflowId || '')
+  const queryClient = useQueryClient()
 
   console.log(`[workflow-tracking] render — route param: "${params.workflowId}", path-derived: "${extractWorkflowIdFromPath()}", state: "${workflowId}"`)
 
@@ -149,10 +189,48 @@ export default function WorkflowTrackingPage() {
 
   useEffect(() => {
     if (workflow) {
-      console.log("[workflow-tracking] rendering — workflow:", workflow)
-      console.log("[workflow-tracking] workflow.status:", workflow?.status)
+      console.log('[workflow-tracking] rendering — workflow:', workflow)
+      console.log('[workflow-tracking] API response timeline:', workflow.timeline)
+      console.log('[workflow-tracking] current_stage:', workflow.current_stage)
+      console.log('[workflow-tracking] progress:', workflow.progress)
     }
   }, [workflow])
+
+  // Subscribe to per-workflow WebSocket stream for live updates
+  useEffect(() => {
+    if (!workflowId) return
+    const sub = subscribeWorkflowStream(
+      workflowId,
+      (msg) => {
+        console.log('[workflow-tracking] ws message', msg)
+        queryClient.setQueryData(['workflow-status', workflowId], (current) => {
+          const existing = (current as WorkflowStatus) || {
+            workflow_id: workflowId,
+            status: 'unknown',
+            active: true,
+            progress: 0,
+            timeline: [],
+            stages: [],
+          }
+          return {
+            ...existing,
+            ...msg,
+            timeline: msg.timeline ?? existing.timeline,
+            stages: existing.stages || [],
+          } as WorkflowStatus
+        })
+      },
+      () => console.log('[workflow-tracking] ws open'),
+      () => console.log('[workflow-tracking] ws close'),
+    )
+    return () => sub.close()
+  }, [workflowId, queryClient])
+
+  const timelineItems = workflow ? normalizeTimelineEvents(workflow.timeline || []) : []
+  const formattedMatchScore = formatPercent(workflow?.match_score ?? null)
+  const formattedConfidence = formatPercent(workflow?.confidence_score ?? null)
+  const formattedRiskScore = formatRiskScore(workflow?.risk_score ?? null)
+  const progressValue = workflow?.progress ?? 0
 
   const handleSearch = useCallback(() => {
     const raw = searchInput.trim()
@@ -180,7 +258,7 @@ export default function WorkflowTrackingPage() {
         <div className="flex gap-3">
           <div className="flex-1">
             <Input
-              placeholder="Workflow ID (e.g. foster-CHILD-3001)"
+              placeholder="Workflow ID (e.g. foster-3001)"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -214,15 +292,27 @@ export default function WorkflowTrackingPage() {
                     </div>
                     <div>
                       <p className="text-xs text-muted-foreground">Child ID</p>
-                      <p className="text-sm font-mono text-foreground mt-1">{workflow.child_id}</p>
+                      <p className="text-sm font-mono text-foreground mt-1">{workflow.child_id || '—'}</p>
                     </div>
                     <div>
                       <p className="text-xs text-muted-foreground">Status</p>
                       <div className="mt-1"><StatusBadge status={workflow.status} /></div>
                     </div>
                     <div>
+                      <p className="text-xs text-muted-foreground">Family ID</p>
+                      <p className="text-sm font-mono text-foreground mt-1">{workflow.family_id || '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Match Score</p>
+                      <p className="text-sm font-mono text-foreground mt-1">{formattedMatchScore}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Confidence</p>
+                      <p className="text-sm font-mono text-foreground mt-1">{formattedConfidence}</p>
+                    </div>
+                    <div>
                       <p className="text-xs text-muted-foreground">Current Stage</p>
-                      <p className="text-sm text-foreground mt-1">{getStageLabel(workflow?.status || "unknown")}</p>
+                      <p className="text-sm text-foreground mt-1">{workflow.current_stage || 'Unknown'}</p>
                     </div>
                     <div>
                       <p className="text-xs text-muted-foreground">Created</p>
@@ -232,16 +322,24 @@ export default function WorkflowTrackingPage() {
                       <p className="text-xs text-muted-foreground">Updated</p>
                       <p className="text-sm text-muted-foreground mt-1">{formatDate(workflow.updated_at)}</p>
                     </div>
-                    {workflow.risk_score !== undefined && (
-                      <div>
-                        <p className="text-xs text-muted-foreground">Risk Score</p>
-                        <p className="text-sm font-mono text-foreground mt-1">{workflow.risk_score}/10</p>
-                      </div>
-                    )}
+                    <div>
+                      <p className="text-xs text-muted-foreground">Risk Score</p>
+                      <p className="text-sm font-mono text-foreground mt-1">{formattedRiskScore}</p>
+                    </div>
                     {workflow.recommended_family && (
                       <div>
                         <p className="text-xs text-muted-foreground">Recommended Family</p>
-                        <p className="text-sm text-foreground mt-1">{workflow.recommended_family}</p>
+                        <p className="text-sm text-foreground mt-1">
+                          {typeof workflow.recommended_family === 'string'
+                            ? workflow.recommended_family
+                            : JSON.stringify(workflow.recommended_family)}
+                        </p>
+                      </div>
+                    )}
+                    {workflow.capacity !== undefined && workflow.capacity !== null && (
+                      <div>
+                        <p className="text-xs text-muted-foreground">Capacity</p>
+                        <p className="text-sm text-foreground mt-1">{workflow.capacity}</p>
                       </div>
                     )}
                   </div>
@@ -250,7 +348,7 @@ export default function WorkflowTrackingPage() {
                   <GlassCardHeader>
                     <GlassCardTitle>Stage Progress</GlassCardTitle>
                   </GlassCardHeader>
-                  <StageMetrics stages={workflow.stages || []} />
+                  <StageMetrics timeline={timelineItems} progress={progressValue} />
                 </GlassCard>
               </div>
 
@@ -265,8 +363,69 @@ export default function WorkflowTrackingPage() {
                   <AnimatedProgressSteps stages={workflow.stages || []} currentStage={workflow.current_stage || ''} />
                 </div>
                 <Separator className="my-4" />
-                <TimelineView stages={workflow.stages || []} />
+                <TimelineView timeline={timelineItems} />
               </GlassCard>
+
+              {workflow.top_matches && Array.isArray(workflow.top_matches) && workflow.top_matches.length > 0 && (
+                <GlassCard>
+                  <GlassCardHeader>
+                    <GlassCardTitle>Top Matches</GlassCardTitle>
+                  </GlassCardHeader>
+                  <div className="space-y-3 p-4">
+                    {workflow.top_matches.map((match, index) => {
+                      const familyObj = (match as any).family ?? match
+                      const familyName = typeof familyObj === 'object'
+                        ? (familyObj as any).name ?? (familyObj as any).family_name ?? `Family ${(familyObj as any).family_id ?? ''}`
+                        : String(familyObj)
+                      const score = (match as any).blended_score ?? (match as any).match_score ?? 0
+                      const riskPct = (match as any).risk_probability ?? 0
+                      const explanation = (match as any).explanation ?? ''
+
+                      return (
+                        <div key={index} className="rounded-xl border border-border p-3 bg-surface">
+                          <div className="flex items-center justify-between mb-1">
+                            <p className="text-sm font-medium text-foreground">
+                              <span className="text-muted-foreground mr-1">#{index + 1}</span>
+                              {familyName}
+                            </p>
+                            <span className="text-sm font-semibold text-primary">{formatPercent(score)}</span>
+                          </div>
+                          <div className="w-full bg-muted rounded-full h-1.5 mb-1">
+                            <div
+                              className="bg-primary h-1.5 rounded-full transition-all"
+                              style={{ width: `${Math.min(score, 100)}%` }}
+                            />
+                          </div>
+                          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                            <span>Risk: {formatPercent(riskPct * 100)}</span>
+                            {explanation && <span className="truncate">{explanation}</span>}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </GlassCard>
+              )}
+
+              {workflow.feature_importance && Array.isArray(workflow.feature_importance) && workflow.feature_importance.length > 0 && (
+                <GlassCard>
+                  <GlassCardHeader>
+                    <GlassCardTitle>Feature Importance</GlassCardTitle>
+                  </GlassCardHeader>
+                  <div className="space-y-3 p-4">
+                    {workflow.feature_importance.map((feature, index) => (
+                      <div key={index} className="rounded-xl border border-border p-3 bg-surface">
+                        <p className="text-sm font-medium text-foreground">
+                          {(feature as any).feature || (feature as any).name || JSON.stringify(feature)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Importance: {((feature as any).importance ?? (feature as any).score ?? 0).toString()}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </GlassCard>
+              )}
 
               {workflow.metadata && Object.keys(workflow.metadata).length > 0 && (
                 <GlassCard>

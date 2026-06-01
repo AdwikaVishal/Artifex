@@ -91,6 +91,8 @@ export default function ReferralPage() {
     child_id: '',
     age: 0,
     gender: '',
+    special_needs: false,
+    languages: '',
     medical_needs: '',
     behavioral_support: '',
     sibling_group: false,
@@ -209,6 +211,24 @@ export default function ReferralPage() {
                     value={form.emergency_level}
                     onChange={(e) => updateField('emergency_level', e.target.value as ReferralSubmission['emergency_level'])}
                   />
+                  <Input
+                    id="languages"
+                    label="Languages"
+                    placeholder="e.g. English, Spanish, ASL"
+                    value={form.languages}
+                    onChange={(e) => updateField('languages', e.target.value)}
+                  />
+                  <div className="flex items-center gap-6 pt-6">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.special_needs}
+                        onChange={(e) => updateField('special_needs', e.target.checked)}
+                        className="w-4 h-4 rounded border-border-light bg-surface-alt accent-primary"
+                      />
+                      <span className="text-sm text-foreground">Special Needs</span>
+                    </label>
+                  </div>
                 </div>
               </GlassCard>
 

@@ -9,17 +9,21 @@ import {
   getHealth,
   getHealthCheck,
   sendChatMessage,
-  getMockMetrics,
-  getMockRiskDistribution,
-  getMockEvents,
-  getMockAgentStatuses,
+  getDashboardMetrics,
+  getRiskDistribution,
+  getDashboardEvents,
+  getAgentStatuses,
+  getFamilies,
+  createFamily,
+  updateFamily,
+  deleteFamily,
 } from '@/services/foster'
-import type { ReferralSubmission, ApproveRequest } from '@/types'
+import type { ReferralSubmission, ApproveRequest, FamilyCreate, FamilyUpdate } from '@/types'
 
 export function useDashboardMetrics() {
   return useQuery({
     queryKey: ['dashboard', 'metrics'],
-    queryFn: getMockMetrics,
+    queryFn: getDashboardMetrics,
     refetchInterval: 15000,
   })
 }
@@ -27,7 +31,7 @@ export function useDashboardMetrics() {
 export function useRiskDistribution() {
   return useQuery({
     queryKey: ['dashboard', 'risk-distribution'],
-    queryFn: getMockRiskDistribution,
+    queryFn: getRiskDistribution,
     refetchInterval: 30000,
   })
 }
@@ -35,7 +39,7 @@ export function useRiskDistribution() {
 export function useDashboardEvents() {
   return useQuery({
     queryKey: ['dashboard', 'events'],
-    queryFn: getMockEvents,
+    queryFn: getDashboardEvents,
     refetchInterval: 10000,
   })
 }
@@ -43,7 +47,7 @@ export function useDashboardEvents() {
 export function useAgentStatuses() {
   return useQuery({
     queryKey: ['agents'],
-    queryFn: getMockAgentStatuses,
+    queryFn: getAgentStatuses,
     refetchInterval: 8000,
   })
 }
@@ -127,6 +131,129 @@ export function useHealthCheck() {
     refetchInterval: 10000,
     retry: false,
     staleTime: 5000,
+  })
+}
+
+export interface MlInsights {
+  avg_match_score: number
+  avg_confidence_score: number
+  avg_risk_score: number
+  total_placements: number
+  high_risk_count: number
+  top_features: Array<{ feature: string; importance: number }>
+  low_match_count: number
+  high_match_count: number
+  avg_alternatives_count: number
+  avg_runner_up_score: number
+}
+
+export function useMlInsights() {
+  const { data: placements } = usePlacements()
+  return useQuery({
+    queryKey: ['ml-insights', placements],
+    queryFn: (): MlInsights => {
+      const all = placements || []
+      const withMatch = all.filter((p) => p.match_score != null)
+      const withRisk = all.filter((p) => p.risk_score != null)
+      const withConfidence = all.filter((p) => p.confidence_score != null)
+      const withFeatures = all.filter((p) => p.feature_importance && p.feature_importance.length > 0)
+
+      const avgMatch = withMatch.length
+        ? withMatch.reduce((s, p) => s + (p.match_score ?? 0), 0) / withMatch.length
+        : 0
+      const avgConfidence = withConfidence.length
+        ? withConfidence.reduce((s, p) => s + (p.confidence_score ?? 0), 0) / withConfidence.length
+        : 0
+      const avgRisk = withRisk.length
+        ? withRisk.reduce((s, p) => s + (p.risk_score ?? 0), 0) / withRisk.length
+        : 0
+
+      // Aggregate feature importance across all placements that have it
+      const featureMap = new Map<string, { total: number; count: number }>()
+      for (const p of withFeatures) {
+        for (const fi of (p.feature_importance || [])) {
+          const entry = featureMap.get(fi.feature) || { total: 0, count: 0 }
+          entry.total += fi.importance
+          entry.count += 1
+          featureMap.set(fi.feature, entry)
+        }
+      }
+      const topFeatures = [...featureMap.entries()]
+        .map(([feature, { total, count }]) => ({ feature, importance: parseFloat((total / count).toFixed(4)) }))
+        .sort((a, b) => b.importance - a.importance)
+        .slice(0, 5)
+
+      // Aggregate top_matches across placements
+      const withAlternatives = all.filter((p) => p.top_matches && p.top_matches.length > 1)
+      const runnerUpScores: number[] = []
+      for (const p of withAlternatives) {
+        const runnerUp = (p.top_matches ?? [])[1]
+        if (runnerUp) {
+          const score = (runnerUp as any).blended_score ?? (runnerUp as any).match_score ?? 0
+          runnerUpScores.push(score)
+        }
+      }
+      const avgRunnerUp = runnerUpScores.length
+        ? runnerUpScores.reduce((s, v) => s + v, 0) / runnerUpScores.length
+        : 0
+
+      return {
+        avg_match_score: parseFloat(avgMatch.toFixed(1)),
+        avg_confidence_score: parseFloat(avgConfidence.toFixed(3)),
+        avg_risk_score: parseFloat(avgRisk.toFixed(1)),
+        total_placements: all.length,
+        high_risk_count: withRisk.filter((p) => (p.risk_score ?? 0) >= 7).length,
+        low_match_count: withMatch.filter((p) => (p.match_score ?? 0) < 60).length,
+        high_match_count: withMatch.filter((p) => (p.match_score ?? 0) >= 85).length,
+        top_features: topFeatures,
+        avg_alternatives_count: withAlternatives.length
+          ? parseFloat((withAlternatives.reduce((s, p) => s + ((p.top_matches?.length ?? 1) - 1), 0) / withAlternatives.length).toFixed(1))
+          : 0,
+        avg_runner_up_score: parseFloat(avgRunnerUp.toFixed(1)),
+      }
+    },
+    enabled: !!placements,
+  })
+}
+
+// ── Families hooks ───────────────────────────────────────────────────────
+
+export function useFamilies() {
+  return useQuery({
+    queryKey: ['families'],
+    queryFn: () => getFamilies(),
+    refetchInterval: 30000,
+  })
+}
+
+export function useCreateFamily() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (data: FamilyCreate) => createFamily(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['families'] })
+    },
+  })
+}
+
+export function useUpdateFamily() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ familyId, data }: { familyId: string; data: FamilyUpdate }) =>
+      updateFamily(familyId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['families'] })
+    },
+  })
+}
+
+export function useDeleteFamily() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (familyId: string) => deleteFamily(familyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['families'] })
+    },
   })
 }
 

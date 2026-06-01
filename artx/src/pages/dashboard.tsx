@@ -1,11 +1,11 @@
-import { useDashboardMetrics, useRiskDistribution, useDashboardEvents, useAgentStatuses } from '@/hooks/use-foster'
+import { useDashboardMetrics, useRiskDistribution, useDashboardEvents, useAgentStatuses, useMlInsights } from '@/hooks/use-foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle, GlassCardValue } from '@/components/ui/glass-card'
 import { DataLoader } from '@/components/data-loader'
 import { StatusBadge, EmergencyBadge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { formatDate } from '@/lib/utils'
 import { motion } from 'framer-motion'
-import { Activity, CheckCircle, Home, AlertTriangle, TrendingUp, TrendingDown, ArrowRight, Bot } from 'lucide-react'
+import { Activity, CheckCircle, Home, AlertTriangle, TrendingUp, TrendingDown, ArrowRight, Bot, BrainCircuit } from 'lucide-react'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie,
 } from 'recharts'
@@ -104,23 +104,27 @@ function RiskPieChart({ data }: { data: { low: number; medium: number; high: num
 }
 
 function AgentMonitor() {
-  const { data: agents, isLoading, error } = useAgentStatuses()
+  const { data: agentMap, isLoading, error } = useAgentStatuses()
+
+  const agents = agentMap?.agents ? Object.values(agentMap.agents) : []
 
   return (
     <DataLoader isLoading={isLoading} error={error} type="card" rows={1}>
       <div className="space-y-2">
-        {agents?.map((agent) => (
+        {agents.length === 0 && (
+          <p className="text-sm text-muted-foreground text-center py-4">No agents registered</p>
+        )}
+        {agents.map((agent: any) => (
           <div key={agent.name} className="flex items-center justify-between py-2 px-3 rounded-lg bg-glass">
             <div className="flex items-center gap-3 min-w-0">
-              <div className={`status-dot status-dot--${agent.status === 'active' ? 'active' : agent.status === 'busy' ? 'warning' : agent.status === 'error' ? 'error' : 'inactive'}`} />
+              <div className={`status-dot status-dot--${agent.status === 'healthy' ? 'active' : agent.status === 'stale' ? 'warning' : 'inactive'}`} />
               <div className="min-w-0">
                 <p className="text-sm text-foreground truncate">{agent.name}</p>
-                <p className="text-xs text-muted-foreground truncate">{agent.task}</p>
+                <p className="text-xs text-muted-foreground truncate">Heartbeat: {agent.last_heartbeat_age_s ?? 'N/A'}s ago</p>
               </div>
             </div>
             <div className="flex items-center gap-3 shrink-0">
-              <span className="text-xs text-muted-foreground font-mono">{agent.workflows_processed}</span>
-              <StatusBadge status={agent.status} />
+              <StatusBadge status={agent.status === 'healthy' ? 'active' : agent.status === 'stale' ? 'busy' : 'error'} />
             </div>
           </div>
         ))}
@@ -212,6 +216,75 @@ function WorkflowActivityChart() {
 }
 
 import { cn } from '@/lib/utils'
+
+function MlInsightsPanel() {
+  const { data: insights, isLoading, error } = useMlInsights()
+  if (isLoading) return null
+  if (error || !insights) {
+    return (
+      <GlassCard>
+        <GlassCardHeader>
+          <BrainCircuit size={16} className="text-muted-foreground" />
+          <GlassCardTitle>ML Insights</GlassCardTitle>
+        </GlassCardHeader>
+        <p className="text-xs text-muted-foreground px-4 pb-4">No placement data available yet</p>
+      </GlassCard>
+    )
+  }
+  return (
+    <GlassCard>
+      <GlassCardHeader>
+        <BrainCircuit size={16} className="text-primary" />
+        <GlassCardTitle>ML Insights</GlassCardTitle>
+      </GlassCardHeader>
+      <div className="px-4 pb-4 space-y-4">
+        <div className="grid grid-cols-3 gap-3">
+          <div className="text-center p-2 rounded-lg bg-accent/10">
+            <p className="text-xl font-bold text-primary">{insights.avg_match_score}</p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Avg Match</p>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-accent/10">
+            <p className="text-xl font-bold text-secondary">{insights.avg_confidence_score}</p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Avg Confidence</p>
+          </div>
+          <div className="text-center p-2 rounded-lg bg-accent/10">
+            <p className="text-xl font-bold text-warning">{insights.avg_risk_score}</p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">Avg Risk</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>Total: {insights.total_placements} placements</span>
+          <span className="text-destructive">{insights.high_risk_count} high-risk</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-success">≥85: {insights.high_match_count}</span>
+          <span className="text-destructive">{"<"}60: {insights.low_match_count}</span>
+        </div>
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>Avg alternatives: {insights.avg_alternatives_count}</span>
+          <span>Avg runner-up: {insights.avg_runner_up_score}%</span>
+        </div>
+        {insights.top_features.length > 0 && (
+          <div>
+            <p className="text-xs text-muted-foreground mb-1">Top Features</p>
+            <div className="space-y-1">
+              {insights.top_features.map((f) => (
+                <div key={f.feature} className="flex items-center gap-2">
+                  <span className="text-[10px] text-foreground flex-1 truncate">{f.feature}</span>
+                  <div className="h-1.5 flex-1 rounded-full bg-accent/20 overflow-hidden">
+                    <div className="h-full rounded-full bg-primary" style={{ width: `${f.importance * 100}%`, maxWidth: '100%' }} />
+                  </div>
+                  <span className="text-[10px] text-muted-foreground font-mono w-8 text-right">{f.importance.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </GlassCard>
+  )
+}
+
 
 export default function DashboardPage() {
   const { data: metrics, isLoading: mLoading, error: mError } = useDashboardMetrics()
@@ -322,6 +395,10 @@ export default function DashboardPage() {
           </GlassCard>
         </motion.div>
       </div>
+
+      <motion.div variants={item}>
+        <MlInsightsPanel />
+      </motion.div>
     </motion.div>
   )
 }

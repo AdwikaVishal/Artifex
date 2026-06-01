@@ -8,6 +8,7 @@ import ReferralPage from '@/pages/referral'
 import WorkflowTrackingPage from '@/pages/workflow-tracking'
 import ApprovalsPage from '@/pages/approvals'
 import PlacementsPage from '@/pages/placements'
+import FamiliesPage from '@/pages/families'
 import ChatPage from '@/pages/chat'
 import MonitoringPage from '@/pages/monitoring'
 
@@ -35,6 +36,7 @@ export default function App() {
               <Route path="/workflow/:workflowId" element={<WorkflowTrackingPage />} />
               <Route path="/approvals" element={<ApprovalsPage />} />
               <Route path="/placements" element={<PlacementsPage />} />
+              <Route path="/families" element={<FamiliesPage />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/monitoring" element={<MonitoringPage />} />
             </Route>

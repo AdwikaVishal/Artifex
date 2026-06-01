@@ -1,0 +1,13 @@
+[
+  "age_match",
+  "age_gap",
+  "location_match",
+  "special_needs_match",
+  "language_match",
+  "capacity",
+  "experience_high",
+  "experience_medium",
+  "experience_low",
+  "family_past_success_rate",
+  "sibling_match"
+]

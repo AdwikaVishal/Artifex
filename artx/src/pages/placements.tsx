@@ -7,8 +7,43 @@ import { StatusBadge, EmergencyBadge } from '@/components/ui/badge'
 import { DataLoader } from '@/components/data-loader'
 import { formatDate, safeLowercase, safeCapitalize } from '@/lib/utils'
 import { motion } from 'framer-motion'
-import { Search, Home, MapPin, Users, ArrowRight } from 'lucide-react'
+import { Search, Home, MapPin, Users, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react'
+import type { TopMatch } from '@/types'
 import { useNavigate } from 'react-router-dom'
+
+function AltMatches({ matches, index }: { matches: TopMatch[]; index: number }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="pt-1">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
+      >
+        {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        <span>Alternative Matches ({matches.length - 1})</span>
+      </button>
+      {open && (
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          className="mt-2 space-y-1.5"
+        >
+          {matches.slice(1).map((m, mi) => {
+            const fam = (m.family ?? m) as Record<string, unknown>
+            const name = (fam.name ?? fam.family_name ?? `Family ${fam.family_id ?? ''}`) as string
+            const score = (m.blended_score ?? m.match_score ?? 0) as number
+            return (
+              <div key={mi} className="flex items-center justify-between rounded-lg border border-border px-2.5 py-1.5 bg-surface/50">
+                <span className="text-xs font-medium text-foreground truncate">{name}</span>
+                <span className="text-xs font-mono text-primary">{score.toFixed(0)}%</span>
+              </div>
+            )
+          })}
+        </motion.div>
+      )}
+    </div>
+  )
+}
 
 export default function PlacementsPage() {
   const navigate = useNavigate()
@@ -118,14 +153,37 @@ export default function PlacementsPage() {
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Confidence</span>
+                      <span className="font-mono">{placement?.confidence_score != null ? `${placement.confidence_score * (placement.confidence_score <= 1 ? 100 : 1)}%` : '—'}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
                       <span className="text-muted-foreground">Risk Score</span>
                       <span className={`font-mono ${
                         (placement?.risk_score ?? 0) >= 7 ? 'text-destructive' : (placement?.risk_score ?? 0) >= 4 ? 'text-warning' : 'text-success'
                       }`}>
-                        {placement?.risk_score ?? '—'}/10
+                        {placement?.risk_score ?? '—'}
                       </span>
                     </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Stage</span>
+                      <span className="font-mono">{placement?.current_stage || '—'}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Workflow</span>
+                      <span className="font-mono">{placement?.status || '—'}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Progress</span>
+                      <span className="font-mono">{placement?.progress != null ? `${placement.progress}%` : '—'}</span>
+                    </div>
                   </div>
+
+                  {placement?.top_matches && placement.top_matches.length > 0 && (
+                    <AltMatches
+                      matches={placement.top_matches}
+                      index={i}
+                    />
+                  )}
 
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
                     <span className="text-xs text-muted-foreground">{formatDate(placement?.placement_date)}</span>
