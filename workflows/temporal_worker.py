@@ -1105,6 +1105,72 @@ async def compute_risk_activity(
         trend=trends,
         explanation=explanation,
     )
+
+    # ── ML decision audit trail ────────────────────────────────────────────────
+    try:
+        import asyncpg as _apg
+        _audit_url = _os_mod.getenv(
+            "DATABASE_URL", "postgresql://artifex:artifex123@postgres:5432/placements"
+        )
+        _audit_conn = await _apg.connect(_audit_url, timeout=3.0)
+        try:
+            risk_label = (
+                "critical" if new_risk > 80
+                else "high" if new_risk > 60
+                else "medium" if new_risk > 30
+                else "low"
+            )
+            await _audit_conn.execute(
+                """
+                INSERT INTO ml_decision_audit
+                    (child_id, placement_id, caseworker_id, decision_type,
+                     model_name, model_version, input_features,
+                     child_demographics, output_score, output_label,
+                     output_details)
+                VALUES ($1, $2, $3, $4, $5, $6,
+                        $7::jsonb, $8::jsonb, $9, $10, $11::jsonb)
+                """,
+                child_id,
+                family.get("family_id"),
+                None,
+                "risk_score",
+                "risk_model",
+                model_tag,
+                _json_mod.dumps({
+                    "age": child.get("age"),
+                    "special_needs": int(bool(child.get("special_needs", False))),
+                    "siblings": child.get("siblings", 0),
+                    "score": score,
+                    "mood_trend": trends.get("mood_trend"),
+                    "incident_rate": trends.get("incident_rate"),
+                    "mood_volatility": trends.get("mood_volatility"),
+                    "checkin_count": trends.get("checkin_count"),
+                    "previous_risk": previous_risk,
+                }),
+                _json_mod.dumps({
+                    "age": child.get("age"),
+                    "gender": child.get("gender"),
+                    "race": child.get("race"),
+                    "fpl_percent": child.get("fpl_percent"),
+                    "zip_code": child.get("zip_code"),
+                    "special_needs": bool(child.get("special_needs", False)),
+                    "sibling_group": bool(child.get("sibling_group", False)),
+                    "emergency_level": child.get("emergency_level", "normal"),
+                }),
+                new_risk,
+                risk_label,
+                _json_mod.dumps({
+                    "base_risk": round(base_risk, 1),
+                    "trend_risk": round(trend_risk, 1),
+                    "previous_risk": previous_risk,
+                    "explanation": explanation[:500],
+                }),
+            )
+        finally:
+            await _audit_conn.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("compute_risk_activity.audit_error", child_id=child_id)
+
     return {"risk": new_risk, "explanation": explanation}
 
 
@@ -1250,6 +1316,10 @@ async def main() -> None:
     # doesn't try to replay foster_workflow.py imports during ArtifexSwarmWorkflow replay.
     from workflows.foster_workflow import FosterPlacementWorkflow  # noqa: PLC0415
     from workflows.parallel_workflow import ParallelSubtaskWorkflow  # noqa: PLC0415
+    from workflows.fairness_workflow import (  # noqa: PLC0415
+        WeeklyFairnessWorkflow,
+        compute_fairness_metrics_activity,
+    )
     from workflows.emergent_workflow import (  # noqa: PLC0415
         EmergentSwarmWorkflow,
         announce_task_activity,
@@ -1268,6 +1338,7 @@ async def main() -> None:
             TaskWorkerWorkflow,
             ParallelSubtaskWorkflow,
             EmergentSwarmWorkflow,
+            WeeklyFairnessWorkflow,
         ],
         activities=[
             planner_activity,
@@ -1286,6 +1357,7 @@ async def main() -> None:
             record_workflow_event_activity,
             compute_risk_activity,
             send_alert_activity,
+            compute_fairness_metrics_activity,
             announce_task_activity,
             wait_for_team_activity,
             wait_for_result_activity,

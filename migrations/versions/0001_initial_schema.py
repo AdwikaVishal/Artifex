@@ -112,7 +112,7 @@ def upgrade() -> None:
         sa.Column(
             "languages_arr",
             postgresql.ARRAY(sa.Text()),
-            server_default="'{}'::text[]",
+            server_default=sa.text("ARRAY[]::text[]"),
         ),
         sa.Column("special_needs_trained", sa.Boolean(), server_default="false"),
         sa.Column("accepts_siblings", sa.Boolean(), server_default="false"),
@@ -143,7 +143,7 @@ def upgrade() -> None:
         sa.Column(
             "languages_arr",
             postgresql.ARRAY(sa.Text()),
-            server_default="'{}'::text[]",
+            server_default=sa.text("ARRAY[]::text[]"),
         ),
         sa.Column("medical_needs", sa.Text(), server_default=""),
         sa.Column("behavioral_support", sa.Text(), server_default=""),

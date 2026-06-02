@@ -306,7 +306,9 @@ class CrisisPredictor:
         self, placement_id: str
     ) -> dict[str, Any] | None:
         """Generate a prediction and persist it to crisis_predictions."""
-        from api.db import get_pool  # noqa: PLC0415
+        import hashlib
+
+        from api.db import get_pool
 
         features = await self.get_placement_features(placement_id)
         if not features:
@@ -321,6 +323,26 @@ class CrisisPredictor:
         if pool is not None:
             try:
                 async with pool.acquire() as conn:
+                    child_row = await conn.fetchrow(
+                        """
+                        SELECT age, gender, race, fpl_percent, zip_code,
+                               special_needs, sibling_group, emergency_level
+                        FROM children
+                        WHERE child_id = $1
+                        """,
+                        features["child_id"],
+                    )
+                    demographics = {
+                        "age": child_row["age"] if child_row else None,
+                        "gender": child_row["gender"] if child_row else None,
+                        "race": child_row["race"] if child_row else None,
+                        "fpl_percent": child_row["fpl_percent"] if child_row else None,
+                        "zip_code": child_row["zip_code"] if child_row else None,
+                        "special_needs": bool(child_row["special_needs"]) if child_row else False,
+                        "sibling_group": bool(child_row["sibling_group"]) if child_row else False,
+                        "emergency_level": child_row["emergency_level"] if child_row else "normal",
+                    }
+
                     await conn.execute(
                         """
                         INSERT INTO crisis_predictions
@@ -336,6 +358,38 @@ class CrisisPredictor:
                         json.dumps(prediction["top_reasons"]),
                         json.dumps(prediction["recommended_interventions"]),
                         self.model_type,
+                    )
+
+                    feature_keys = sorted(k for k in features
+                                         if k not in ("placement_id", "child_id"))
+                    feature_hash = hashlib.sha256(
+                        "|".join(f"{k}={features[k]}" for k in feature_keys).encode()
+                    ).hexdigest()[:16]
+
+                    await conn.execute(
+                        """
+                        INSERT INTO ml_decision_audit
+                            (child_id, placement_id, decision_type,
+                             model_name, model_version, feature_hash,
+                             input_features, child_demographics,
+                             output_score, output_label, output_details)
+                        VALUES ($1, $2, $3, $4, $5, $6,
+                                $7::jsonb, $8::jsonb, $9, $10, $11::jsonb)
+                        """,
+                        features["child_id"],
+                        placement_id,
+                        "crisis_prediction",
+                        "crisis_drift_model",
+                        self.model_type,
+                        feature_hash,
+                        json.dumps({k: features[k] for k in feature_keys}),
+                        json.dumps(demographics),
+                        prediction["probability"],
+                        prediction["risk_level"],
+                        json.dumps({
+                            "top_reasons": prediction["top_reasons"],
+                            "recommended_interventions": prediction["recommended_interventions"],
+                        }),
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

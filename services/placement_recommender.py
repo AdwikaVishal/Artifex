@@ -403,7 +403,70 @@ async def rank_families(
         })
 
     scored.sort(key=lambda x: x["blended_score"], reverse=True)
-    return scored[:top_n]
+    top = scored[:top_n]
+
+    # ── ML decision audit trail ────────────────────────────────────────────────
+    if top:
+        import asyncpg as _apg
+        best = top[0]
+        _db_url = os.getenv(
+            "DATABASE_URL", "postgresql://artifex:artifex123@postgres:5432/placements"
+        )
+        try:
+            _audit_conn = await _apg.connect(_db_url, timeout=3.0)
+            try:
+                await _audit_conn.execute(
+                    """
+                    INSERT INTO ml_decision_audit
+                        (child_id, decision_type, model_name, model_version,
+                         input_features, child_demographics,
+                         output_score, output_label, output_confidence,
+                         output_details)
+                    VALUES ($1, $2, $3, $4,
+                            $5::jsonb, $6::jsonb,
+                            $7, $8, $9,
+                            $10::jsonb)
+                    """,
+                    child.get("child_id"),
+                    "placement_match",
+                    "placement_model",
+                    "xgboost-v1",
+                    json.dumps({
+                        "age": child.get("age"),
+                        "special_needs": int(bool(child.get("special_needs", False))),
+                        "siblings": child.get("siblings", 0),
+                        "preferred_location": child.get("preferred_location"),
+                        "capacity_needed": child.get("capacity_needed", 1),
+                        "removal_reason": child.get("removal_reason"),
+                    }),
+                    json.dumps({
+                        "age": child.get("age"),
+                        "gender": child.get("gender"),
+                        "race": child.get("race"),
+                        "fpl_percent": child.get("fpl_percent"),
+                        "zip_code": child.get("zip_code"),
+                        "special_needs": bool(child.get("special_needs", False)),
+                        "sibling_group": bool(child.get("sibling_group", False)),
+                        "emergency_level": child.get("emergency_level", "normal"),
+                    }),
+                    best.get("blended_score", 0),
+                    "recommended",
+                    best.get("confidence_score", 0),
+                    json.dumps({
+                        "match_score": best.get("match_score"),
+                        "risk_probability": best.get("risk_probability"),
+                        "family_id": best.get("family", {}).get("family_id"),
+                        "family_name": best.get("family", {}).get("name"),
+                        "explanation": best.get("explanation"),
+                    }),
+                )
+            finally:
+                await _audit_conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning("placement_recommender.audit_error",
+                           child_id=child.get("child_id"))
+
+    return top
 
 
 def _build_explanation(child: dict, family: dict, match_score: float, risk_prob: float) -> str:

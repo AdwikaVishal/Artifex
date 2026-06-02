@@ -317,7 +317,11 @@ from .routes.placements import router as placements_router  # noqa: E402
 from .routes.referral   import router as referral_router    # noqa: E402
 from .routes.children   import router as children_router    # noqa: E402
 from .routes.audit      import router as audit_router       # noqa: E402
+from .routes.crisis    import router as crisis_router     # noqa: E402
+from .routes.ml_audit  import router as ml_audit_router   # noqa: E402
 from .routes.fairness   import router as fairness_router    # noqa: E402
+from .routes.twin      import router as twin_router       # noqa: E402
+from .routes.timeline  import router as timeline_router   # noqa: E402
 from .websockets.dashboard import router as ws_dashboard_router  # noqa: E402
 from .websockets.logs      import router as ws_logs_router       # noqa: E402
 from .websockets.workflow  import router as ws_workflow_router   # noqa: E402
@@ -328,7 +332,11 @@ app.include_router(placements_router)
 app.include_router(referral_router)
 app.include_router(children_router)
 app.include_router(audit_router)
+app.include_router(crisis_router)
+app.include_router(ml_audit_router)
 app.include_router(fairness_router)
+app.include_router(twin_router)
+app.include_router(timeline_router)
 app.include_router(ws_dashboard_router)
 app.include_router(ws_logs_router)
 app.include_router(ws_workflow_router)

@@ -7,7 +7,7 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { Shield, Search } from 'lucide-react'
-import { FairnessDashboard } from '@/components/FairnessDashboard'
+import FairnessAuditDashboard from '@/components/FairnessAuditDashboard'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -103,8 +103,8 @@ export default function FairnessPage() {
         </div>
       </div>
 
-      {/* Main fairness dashboard */}
-      <FairnessDashboard />
+      {/* Main fairness audit dashboard — 5 metric families */}
+      <FairnessAuditDashboard />
 
       {/* SHAP explanation lookup */}
       <GlassCard>

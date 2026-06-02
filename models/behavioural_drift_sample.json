@@ -1,0 +1,194 @@
+{
+  "child_id": "CH-A0427",
+  "placement_id": "foster-CH-A0427",
+  "snapshot_date": "2026-05-28T06:00:00Z",
+  "window_start": "2026-05-01",
+  "window_end": "2026-05-28",
+  "weeks_in_placement": 14,
+
+  "drift_signals": {
+    "school_attendance": {
+      "school_days_total": 20,
+      "days_attended": 14,
+      "days_absent_excused": 2,
+      "days_absent_unexcused": 4,
+      "late_arrivals": 5,
+      "early_departures": 2,
+      "attendance_rate": 0.70,
+      "attendance_trend": -0.08,
+      "baseline_attendance_rate": 0.92,
+      "delta_from_baseline": -0.22,
+      "school_engagement_flags": ["withdrawn", "sleeping_in_class", "peer_conflict"]
+    },
+
+    "caseworker_visits": {
+      "visit_count": 3,
+      "entries": [
+        {
+          "visit_date": "2026-05-07",
+          "worker_id": "CW-3312",
+          "visit_type": "scheduled",
+          "note_length_chars": 412,
+          "sentiment_score": -0.15,
+          "sentiment_label": "negative",
+          "keyword_flags": ["defiance", "crying_spells", "parental_stress"],
+          "note_snippet": "Foster mother reported Child A refused to do homework three nights this week. Yelling when asked to turn off tablet. Cried for 45 minutes after being grounded. Mother expressed feeling overwhelmed."
+        },
+        {
+          "visit_date": "2026-05-14",
+          "worker_id": "CW-3312",
+          "visit_type": "scheduled",
+          "note_length_chars": 298,
+          "sentiment_score": -0.42,
+          "sentiment_label": "negative",
+          "keyword_flags": ["aggression", "property_damage", "supervisor_concern"],
+          "note_snippet": "Child A threw a toy at the wall during a disagreement with foster sibling, leaving a small dent. Foster mother called the after-hours support line. Child refused to apologise."
+        },
+        {
+          "visit_date": "2026-05-21",
+          "worker_id": "CW-3312",
+          "visit_type": "emergency",
+          "note_length_chars": 634,
+          "sentiment_score": -0.68,
+          "sentiment_label": "negative",
+          "keyword_flags": ["runaway_ideation", "self_harm", "withdrawal", "parental_stress"],
+          "note_snippet": "Emergency visit after Child A threatened to run away during a therapy appointment. Child expressed 'nobody wants me here'. Found with a packed bag under the bed. No self-harm marks observed but ideation is concerning. Foster mother requesting placement reassessment."
+        }
+      ],
+      "avg_sentiment": -0.42,
+      "sentiment_trend": -0.26,
+      "min_sentiment": -0.68,
+      "flag_count_total": 9,
+      "dominant_flags": ["parental_stress", "withdrawal", "defiance"],
+      "baseline_avg_sentiment": 0.18,
+      "delta_sentiment_from_baseline": -0.60
+    },
+
+    "incident_reports": {
+      "incidents_7d": 3,
+      "incidents_14d": 5,
+      "incidents_28d": 8,
+      "incidents": [
+        {
+          "incident_date": "2026-05-03",
+          "severity": 2,
+          "category": "verbal_disruption",
+          "resolved_within_24h": true,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-07",
+          "severity": 3,
+          "category": "property_damage",
+          "resolved_within_24h": true,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-10",
+          "severity": 2,
+          "category": "peer_conflict",
+          "resolved_within_24h": true,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-12",
+          "severity": 2,
+          "category": "medication_refusal",
+          "resolved_within_24h": false,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-14",
+          "severity": 2,
+          "category": "property_damage",
+          "resolved_within_24h": true,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-19",
+          "severity": 3,
+          "category": "physical_aggression",
+          "resolved_within_24h": false,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-21",
+          "severity": 4,
+          "category": "runaway_attempt",
+          "resolved_within_24h": false,
+          "involved_caseworker": "CW-3312"
+        },
+        {
+          "incident_date": "2026-05-26",
+          "severity": 3,
+          "category": "self_harm",
+          "resolved_within_24h": false,
+          "involved_caseworker": "CW-4419"
+        }
+      ],
+      "cumulative_severity_28d": 21,
+      "avg_severity": 2.6,
+      "severity_trend": 0.31,
+      "baseline_incident_rate": 0.5,
+      "delta_incident_rate_from_baseline": 1.5,
+      "resolved_fraction": 0.5
+    },
+
+    "medication_compliance": {
+      "applies": true,
+      "total_doses": 56,
+      "doses_administered": 43,
+      "doses_missed": 13,
+      "compliance_rate": 0.77,
+      "compliance_trend": -0.12,
+      "baseline_compliance_rate": 0.95,
+      "delta_compliance_from_baseline": -0.18,
+      "medications": [
+        {
+          "name": "Methylphenidate ER 20 mg",
+          "total_doses": 28,
+          "missed_doses": 8,
+          "compliance_rate": 0.71
+        },
+        {
+          "name": "Sertraline 50 mg",
+          "total_doses": 28,
+          "missed_doses": 5,
+          "compliance_rate": 0.82
+        }
+      ],
+      "refusal_incidents": 3
+    },
+
+    "communication_patterns": {
+      "outreach_attempts": 12,
+      "responded_count": 7,
+      "response_rate": 0.58,
+      "missed_contacts": 5,
+      "avg_response_lag_hours": 18.5,
+      "response_lag_trend": 4.2,
+      "baseline_avg_lag_hours": 5.1,
+      "delta_lag_from_baseline": 13.4,
+      "avg_tone_score": -0.31,
+      "tone_trend": -0.09,
+      "communication_channels": ["phone", "sms", "email", "in_person"],
+      "primary_channel": "phone",
+      "after_hours_contacts": 4
+    }
+  },
+
+  "composite_drift_score": {
+    "overall_drift_index": 72.4,
+    "drifting_signals": [
+      "school_attendance",
+      "caseworker_sentiment",
+      "incident_frequency",
+      "incident_severity",
+      "medication_compliance",
+      "communication_lag",
+      "communication_tone"
+    ],
+    "signal_trend_direction": "rapidly_declining",
+    "prediction_window_horizon": "21_days"
+  }
+}

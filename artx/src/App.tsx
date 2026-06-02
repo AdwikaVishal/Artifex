@@ -15,6 +15,8 @@ import MonitoringPage from '@/pages/monitoring'
 import LoginPage from '@/pages/Login'
 import FairnessPage from '@/pages/fairness'
 import ChildrenPage from '@/pages/children'
+import MlAuditPage from '@/pages/ml-audit'
+import TwinPage from '@/pages/twin'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +49,9 @@ export default function App() {
                 <Route path="/fairness" element={<FairnessPage />} />
                 <Route path="/chat" element={<ChatPage />} />
                 <Route path="/monitoring" element={<MonitoringPage />} />
+                <Route path="/ml-audit" element={<MlAuditPage />} />
+                <Route path="/twin" element={<TwinPage />} />
+                <Route path="/twin/:childId" element={<TwinPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Routes>

@@ -2,17 +2,20 @@
  * ChildrenPage – lists all children and shows the Child Life Timeline
  * for a selected child.
  */
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { Users, Search, ChevronRight } from 'lucide-react'
+import { Users, Search, ChevronRight, List, LayoutGrid } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import api from '@/services/api'
+import { getTimelineEvents } from '@/services/foster'
+import type { TimelineEventV2 } from '@/services/foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { Input } from '@/components/ui/input'
 import { DataLoader } from '@/components/data-loader'
 import { EmergencyBadge } from '@/components/ui/badge'
 import { ChildLifeTimeline } from '@/components/ChildLifeTimeline'
 import { cn } from '@/lib/utils'
+import type { TimelineEvent } from '@/components/ChildLifeTimeline'
 
 interface Child {
   child_id: string
@@ -42,6 +45,38 @@ export default function ChildrenPage() {
   const { data: children, isLoading, error } = useChildren()
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<'compact' | 'detailed'>('detailed')
+
+  // Fetch timeline events for the selected child
+  const { data: timelineData, isLoading: timelineLoading } = useQuery({
+    queryKey: ['child-life-events', selectedId],
+    queryFn: () => getTimelineEvents(selectedId!, { per_page: 200 }),
+    enabled: !!selectedId,
+    staleTime: 1000 * 60 * 2,
+    retry: 1,
+  })
+
+  // Map API events to component TimelineEvent type
+  const timelineEvents: TimelineEvent[] = useMemo(() => {
+    if (!timelineData?.events) return []
+    return timelineData.events.map((ev: TimelineEventV2) => ({
+      id: ev.id,
+      child_id: ev.child_id,
+      event_type: ev.event_type as TimelineEvent['event_type'],
+      event_date: ev.event_date,
+      event_time: ev.event_time ?? undefined,
+      recorded_at: ev.recorded_at,
+      source_table: ev.source_table ?? undefined,
+      source_id: ev.source_id ?? undefined,
+      conflict_resolution: ev.conflict_resolution ?? undefined,
+      payload: ev.payload,
+      is_verified: ev.is_verified,
+      verified_by: ev.verified_by ?? undefined,
+      verified_at: ev.verified_at ?? undefined,
+      superseded_by: ev.superseded_by ?? undefined,
+      seal_level: (ev.seal_level || 'none') as TimelineEvent['seal_level'],
+    }))
+  }, [timelineData])
 
   const filtered = useMemo(() => {
     if (!children) return []
@@ -54,6 +89,10 @@ export default function ChildrenPage() {
         (c.location || '').toLowerCase().includes(q)
     )
   }, [children, search])
+
+  const handleEventClick = useCallback((event: TimelineEvent) => {
+    // Handled internally by ChildLifeTimeline
+  }, [])
 
   return (
     <motion.div
@@ -141,7 +180,42 @@ export default function ChildrenPage() {
         {/* Right: timeline */}
         <div className="lg:col-span-2">
           {selectedId ? (
-            <ChildLifeTimeline childId={selectedId} />
+            <div className="space-y-3">
+              {/* View mode toggle */}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">
+                  {timelineLoading ? 'Loading...' : `${timelineEvents.length} events`}
+                </span>
+                <div className="flex gap-1 bg-glass rounded-lg p-0.5 border border-border-light">
+                  <button
+                    onClick={() => setViewMode('compact')}
+                    className={cn(
+                      'p-1.5 rounded-md transition-all',
+                      viewMode === 'compact' ? 'bg-glass-hover text-foreground' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                    aria-label="Compact view"
+                  >
+                    <List className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('detailed')}
+                    className={cn(
+                      'p-1.5 rounded-md transition-all',
+                      viewMode === 'detailed' ? 'bg-glass-hover text-foreground' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                    aria-label="Detailed view"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+              <ChildLifeTimeline
+                childId={selectedId}
+                events={timelineEvents}
+                viewMode={viewMode}
+                onEventClick={handleEventClick}
+              />
+            </div>
           ) : (
             <GlassCard>
               <div className="flex flex-col items-center justify-center py-16 text-center">

@@ -1,0 +1,541 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://artifex.local/schemas/behavioural_drift_snapshot.json",
+  "title": "BehaviouralDriftSnapshot",
+  "description": "Multi-signal behavioural drift snapshot for the Predictive Crisis Engine. Captures five drift signal domains — school attendance, caseworker visit notes, incident reports, medication compliance, and communication patterns — to forecast placement disruption 2–4 weeks in advance. Designed for 28-day rolling windows with trend and delta-from-baseline computations. Stored as a JSONB column child of crisis_predictions or in a dedicated behavioural_signals table.",
+
+  "type": "object",
+
+  "properties": {
+    "child_id": {
+      "type": "string",
+      "description": "Unique child identifier (e.g. CH-A0427). References children.child_id."
+    },
+    "placement_id": {
+      "type": "string",
+      "description": "Active placement workflow ID. References placements.workflow_id."
+    },
+    "snapshot_date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this snapshot was computed."
+    },
+    "window_start": {
+      "type": "string",
+      "format": "date",
+      "description": "Inclusive start of the 28-day rolling lookback window."
+    },
+    "window_end": {
+      "type": "string",
+      "format": "date",
+      "description": "Inclusive end of the 28-day rolling lookback window."
+    },
+    "weeks_in_placement": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total weeks the child has been in the current placement at time of snapshot."
+    },
+
+    "drift_signals": {
+      "type": "object",
+      "description": "Container for all five behavioural drift signal domains. Each signal includes raw observations, computed aggregates, trend, and delta-from-baseline where applicable.",
+      "properties": {
+
+        "school_attendance": {
+          "type": "object",
+          "description": "School attendance drift signal. Measures attendance frequency, trend over the window, and deviation from the child's baseline attendance rate (computed from the first 4 weeks post-placement).",
+          "properties": {
+            "school_days_total": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total school days in the window (excluding weekends, holidays, and school closures)."
+            },
+            "days_attended": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Days the child physically attended school."
+            },
+            "days_absent_excused": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Absences with a valid excuse (medical appointment, court date, family visit, etc.)."
+            },
+            "days_absent_unexcused": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Unexcused absences (truancy, skip, no-show without notice)."
+            },
+            "late_arrivals": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of late arrivals (>15 min late) during the window."
+            },
+            "early_departures": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of early departures (>15 min early) during the window."
+            },
+            "attendance_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Proportion of school days attended: days_attended / school_days_total."
+            },
+            "attendance_trend": {
+              "type": "number",
+              "description": "Slope of a linear regression fitted to weekly attendance rates over the window. Positive means attendance is improving; negative means declining."
+            },
+            "baseline_attendance_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Child's expected attendance rate, computed as the mean attendance rate during the first 4 weeks of this placement (stable reference point)."
+            },
+            "delta_from_baseline": {
+              "type": "number",
+              "description": "Current attendance_rate minus baseline_attendance_rate. Negative values indicate the child is attending less than their own historical norm."
+            },
+            "school_engagement_flags": {
+              "type": "array",
+              "description": "Keyword flags from school liaison reports or teacher check-ins during the window.",
+              "items": {
+                "type": "string",
+                "enum": ["withdrawn", "disruptive", "sleeping_in_class", "peer_conflict", "academic_decline", "no_flags"]
+              }
+            }
+          },
+          "required": [
+            "school_days_total", "days_attended", "attendance_rate",
+            "attendance_trend", "baseline_attendance_rate", "delta_from_baseline",
+            "school_engagement_flags"
+          ],
+          "additionalProperties": false
+        },
+
+        "caseworker_visits": {
+          "type": "object",
+          "description": "Caseworker home-visit note signal. Analyses sentiment and keyword flags from structured visit notes. Each monthly visit generates a note entry; aggregate statistics are computed across the window.",
+          "properties": {
+            "visit_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of caseworker visits during the window (expected 1–4 per month per policy)."
+            },
+            "entries": {
+              "type": "array",
+              "description": "Individual visit note records. Each entry captures one scheduled or ad-hoc visit.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "visit_date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Date of the home visit."
+                  },
+                  "worker_id": {
+                    "type": "string",
+                    "description": "Caseworker identifier who conducted the visit."
+                  },
+                  "visit_type": {
+                    "type": "string",
+                    "enum": ["scheduled", "emergency", "follow_up"],
+                    "description": "Category of visit: routine scheduled check-in, emergency response, or incident follow-up."
+                  },
+                  "note_length_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Length of the visit note in characters (a proxy for depth of engagement)."
+                  },
+                  "sentiment_score": {
+                    "type": "number",
+                    "minimum": -1,
+                    "maximum": 1,
+                    "description": "NLP-derived sentiment score of the visit note text. -1 = very negative (escalation risk), +1 = very positive (stable/improving)."
+                  },
+                  "sentiment_label": {
+                    "type": "string",
+                    "enum": ["negative", "neutral", "positive"],
+                    "description": "Bucketed sentiment class derived from sentiment_score thresholds."
+                  },
+                  "keyword_flags": {
+                    "type": "array",
+                    "description": "Predefined risk-relevant keywords or phrases detected in the note via keyword matching or NER.",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "aggression", "self_harm", "runaway_ideation", "defiance",
+                        "withdrawal", "crying_spells", "nightmares", "bedwetting",
+                        "hoarding_food", "lying", "property_damage", "substance_concern",
+                        "supervisor_concern", "parental_stress", "sibling_conflict",
+                        "attachment_issue", "regression", "no_flags"
+                      ]
+                    }
+                  },
+                  "note_snippet": {
+                    "type": "string",
+                    "maxLength": 500,
+                    "description": "Truncated excerpt of the original case note for context and audit (no PII beyond what's already in the note)."
+                  }
+                },
+                "required": ["visit_date", "worker_id", "sentiment_score", "sentiment_label", "keyword_flags"],
+                "additionalProperties": false
+              }
+            },
+            "avg_sentiment": {
+              "type": "number",
+              "description": "Mean sentiment_score across all visit entries in the window."
+            },
+            "sentiment_trend": {
+              "type": "number",
+              "description": "Slope of sentiment scores ordered by visit_date. Negative trend means the child/family is deteriorating."
+            },
+            "min_sentiment": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1,
+              "description": "Lowest (most negative) sentiment_score in the window — captures worst-moment signal."
+            },
+            "flag_count_total": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Sum of all keyword flags across all entries in the window."
+            },
+            "dominant_flags": {
+              "type": "array",
+              "description": "Top-3 most frequently detected keyword flags, sorted by count descending.",
+              "items": { "type": "string" },
+              "maxItems": 3
+            },
+            "baseline_avg_sentiment": {
+              "type": "number",
+              "description": "Mean avg_sentiment from the first 4 weeks of this placement. Reference point for sentiment drift."
+            },
+            "delta_sentiment_from_baseline": {
+              "type": "number",
+              "description": "Current avg_sentiment minus baseline_avg_sentiment. Negative drift signals deteriorating rapport."
+            }
+          },
+          "required": [
+            "visit_count", "entries", "avg_sentiment", "sentiment_trend",
+            "flag_count_total", "dominant_flags"
+          ],
+          "additionalProperties": false
+        },
+
+        "incident_reports": {
+          "type": "object",
+          "description": "Incident report signal. Aggregates frequency and severity of reported behavioural or safety incidents across multiple rolling windows to capture both acute and chronic patterns.",
+          "properties": {
+            "incidents_7d": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of incidents reported in the last 7 days (acute signal)."
+            },
+            "incidents_14d": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of incidents reported in the last 14 days (sub-acute signal)."
+            },
+            "incidents_28d": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of incidents reported in the full 28-day window (chronic signal)."
+            },
+            "incidents": {
+              "type": "array",
+              "description": "Individual incident records within the 28-day window.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "incident_date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Date the incident occurred or was reported."
+                  },
+                  "severity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "description": "Severity rating: 1 = minor (verbal outburst), 2 = moderate (property damage <$50), 3 = significant (aggression without injury), 4 = severe (physical altercation, police involvement), 5 = critical (self-harm, hospitalisation, runaway)."
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "verbal_disruption", "physical_aggression", "property_damage",
+                      "runaway_attempt", "self_harm", "substance_incident",
+                      "peer_conflict", "school_incident", "medication_refusal",
+                      "other"
+                    ],
+                    "description": "Categorised type of incident."
+                  },
+                  "resolved_within_24h": {
+                    "type": "boolean",
+                    "description": "Whether the incident was de-escalated or resolved within 24 hours."
+                  },
+                  "involved_caseworker": {
+                    "type": "string",
+                    "description": "Caseworker ID who handled or documented the incident."
+                  }
+                },
+                "required": ["incident_date", "severity", "category"],
+                "additionalProperties": false
+              }
+            },
+            "cumulative_severity_28d": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Sum of severity scores for all incidents in the 28-day window."
+            },
+            "avg_severity": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Mean severity score across incidents in the window."
+            },
+            "severity_trend": {
+              "type": "number",
+              "description": "Slope of severity scores ordered by incident_date. Positive = incidents are getting worse."
+            },
+            "baseline_incident_rate": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Mean weekly incident count during the first 4 weeks of placement. Baseline for frequency comparison."
+            },
+            "delta_incident_rate_from_baseline": {
+              "type": "number",
+              "description": "Current weekly incident rate minus baseline_incident_rate. Positive = more frequent than usual."
+            },
+            "resolved_fraction": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Proportion of incidents resolved within 24h. Low values may indicate escalating dysregulation."
+            }
+          },
+          "required": [
+            "incidents_7d", "incidents_14d", "incidents_28d",
+            "cumulative_severity_28d", "avg_severity", "severity_trend",
+            "resolved_fraction"
+          ],
+          "additionalProperties": false
+        },
+
+        "medication_compliance": {
+          "type": "object",
+          "description": "Medication compliance signal. Only computed when the child has active prescribed medications. Tracks adherence rates and trends. If the child has no prescriptions, applied=false and all numeric fields are null.",
+          "properties": {
+            "applies": {
+              "type": "boolean",
+              "description": "False if the child has no prescribed medications. When false, all other fields in this block should be treated as absent/null by the model."
+            },
+            "total_doses": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total prescribed doses in the window (e.g. twice daily × 28 days = 56)."
+            },
+            "doses_administered": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Doses confirmed administered by the foster parent or caregiver."
+            },
+            "doses_missed": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Doses that were not administered (refused, forgotten, or unavailable)."
+            },
+            "compliance_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "doses_administered / total_doses. Core adherence metric."
+            },
+            "compliance_trend": {
+              "type": "number",
+              "description": "Slope of weekly compliance rates over the window. Negative = child is becoming less compliant."
+            },
+            "baseline_compliance_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Mean compliance rate during the first 4 weeks of placement or medication start."
+            },
+            "delta_compliance_from_baseline": {
+              "type": "number",
+              "description": "Current compliance_rate minus baseline_compliance_rate. Negative = adherence is deteriorating."
+            },
+            "medications": {
+              "type": "array",
+              "description": "Per-medication breakdown for clinical visibility.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Medication name (e.g. 'Methylphenidate ER 20 mg')."
+                  },
+                  "total_doses": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Total prescribed doses for this medication in the window."
+                  },
+                  "missed_doses": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Missed doses for this medication."
+                  },
+                  "compliance_rate": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Per-medication adherence rate."
+                  }
+                },
+                "required": ["name", "total_doses", "missed_doses", "compliance_rate"],
+                "additionalProperties": false
+              }
+            },
+            "refusal_incidents": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of documented medication refusal incidents in the window (verbal refusal, hiding, spitting out)."
+            }
+          },
+          "required": ["applies"],
+          "additionalProperties": false
+        },
+
+        "communication_patterns": {
+          "type": "object",
+          "description": "Communication pattern signal. Captures response latency and tone from caseworker–foster-parent digital communication (email, SMS, app-based messaging).",
+          "properties": {
+            "outreach_attempts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of outbound contacts initiated by the caseworker (phone calls, emails, SMS, app messages) during the window."
+            },
+            "responded_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of outreach attempts that received a response from the foster parent or child (if age-appropriate)."
+            },
+            "response_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "responded_count / outreach_attempts. Fraction of caseworker outreaches that got a reply."
+            },
+            "missed_contacts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of unanswered outreaches (no response within 48 hours)."
+            },
+            "avg_response_lag_hours": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Mean time-to-response in hours across all responded outreaches."
+            },
+            "response_lag_trend": {
+              "type": "number",
+              "description": "Slope of response lag hours over the window. Positive = foster parent is responding more slowly over time."
+            },
+            "baseline_avg_lag_hours": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Mean avg_response_lag_hours during the first 4 weeks of placement."
+            },
+            "delta_lag_from_baseline": {
+              "type": "number",
+              "description": "Current avg_response_lag_hours minus baseline_avg_lag_hours. Positive = communication is slowing (potential disengagement)."
+            },
+            "avg_tone_score": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1,
+              "description": "Mean NLP sentiment score of written responses (email/SMS body) from the foster parent. -1 = hostile/frustrated, +1 = cooperative/warm."
+            },
+            "tone_trend": {
+              "type": "number",
+              "description": "Slope of tone scores over the window. Negative = communication tone is deteriorating (frustration, burnout)."
+            },
+            "communication_channels": {
+              "type": "array",
+              "description": "Channels used during the window.",
+              "items": {
+                "type": "string",
+                "enum": ["phone", "sms", "email", "app_message", "in_person"]
+              }
+            },
+            "primary_channel": {
+              "type": "string",
+              "enum": ["phone", "sms", "email", "app_message", "in_person"],
+              "description": "Most frequently used communication channel in the window."
+            },
+            "after_hours_contacts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of contacts initiated or responded to outside normal business hours (6pm–8am), which may indicate crisis behaviour."
+            }
+          },
+          "required": [
+            "outreach_attempts", "responded_count", "response_rate",
+            "avg_response_lag_hours", "response_lag_trend",
+            "avg_tone_score", "tone_trend"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "school_attendance",
+        "caseworker_visits",
+        "incident_reports",
+        "medication_compliance",
+        "communication_patterns"
+      ],
+      "additionalProperties": false
+    },
+
+    "composite_drift_score": {
+      "type": "object",
+      "description": "Aggregate drift score computed from all five signal domains. Used directly as input features to the XGBoost crisis predictor alongside the existing risk_score, age, and demographic features.",
+      "properties": {
+        "overall_drift_index": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weighted composite of all signal deltas and trends. 0 = fully stable (all signals at baseline); 100 = severe drift across all domains. Weighting: incidents 30%, school 20%, sentiment 20%, communication 15%, medication 15% (prorated if medication does not apply)."
+        },
+        "drifting_signals": {
+          "type": "array",
+          "description": "List of signal domains currently flagged as drifting (delta exceeds ±1 IQR from their own baseline).",
+          "items": {
+            "type": "string",
+            "enum": [
+              "school_attendance", "caseworker_sentiment", "incident_severity",
+              "incident_frequency", "medication_compliance", "communication_lag",
+              "communication_tone"
+            ]
+          }
+        },
+        "signal_trend_direction": {
+          "type": "string",
+          "enum": ["improving", "stable", "declining", "rapidly_declining"],
+          "description": "Aggregate direction of drift across all signals. 'rapidly_declining' triggers immediate supervisor alert."
+        },
+        "prediction_window_horizon": {
+          "type": "string",
+          "enum": ["14_days", "21_days", "28_days"],
+          "description": "Forecast horizon for which this snapshot was computed (2 weeks, 3 weeks, or 4 weeks ahead)."
+        }
+      },
+      "required": ["overall_drift_index", "drifting_signals", "signal_trend_direction", "prediction_window_horizon"],
+      "additionalProperties": false
+    }
+  },
+
+  "required": [
+    "child_id", "placement_id", "snapshot_date", "window_start", "window_end",
+    "drift_signals", "composite_drift_score"
+  ],
+
+  "additionalProperties": false
+}

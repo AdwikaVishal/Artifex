@@ -509,7 +509,141 @@ export async function getShapExplanation(workflowId: string): Promise<ShapExplan
   return res.data
 }
 
-// ── Child Timeline ────────────────────────────────────────────────────────
+// ── Child Timeline (v2 – child_life_events) ────────────────────────────────
+
+export type TimelineEventType =
+  | 'placement_start' | 'placement_end' | 'placement_change'
+  | 'school_change' | 'incident_report' | 'court_date' | 'legal_milestone'
+  | 'medical_appointment' | 'therapy_session' | 'sibling_contact'
+  | 'family_visitation' | 'milestone' | 'crisis_alert' | 'drift_threshold'
+  | 'prediction_feedback' | 'twin_simulation' | 'caseworker_assignment'
+  | 'caseworker_change' | 'manual_entry'
+
+export type TimelineEventSealLevel = 'none' | 'partial' | 'full'
+
+export interface TimelineEventV2 {
+  id: number
+  child_id: string
+  event_type: TimelineEventType
+  event_date: string
+  event_time?: string | null
+  recorded_at: string
+  source_table?: string | null
+  source_id?: number | null
+  conflict_resolution?: string | null
+  payload: Record<string, unknown>
+  is_verified: boolean
+  verified_by?: string | null
+  verified_at?: string | null
+  superseded_by?: number | null
+  seal_level: TimelineEventSealLevel
+}
+
+export interface TimelineResponse {
+  child_id: string
+  events: TimelineEventV2[]
+  total: number
+  page: number
+  per_page: number
+  total_pages: number
+}
+
+export interface CreateEventRequest {
+  event_type: TimelineEventType
+  event_date: string
+  event_time?: string | null
+  payload?: Record<string, unknown>
+  seal_level?: TimelineEventSealLevel
+  source_table?: string | null
+  source_id?: number | null
+}
+
+export interface CreateEventResponse {
+  status: string
+  event_id: number
+  message: string
+}
+
+export interface VerifyEventResponse {
+  status: string
+  message: string
+}
+
+export interface TimelineExportResponse {
+  status: string
+  child_info: Record<string, unknown>
+  events: TimelineEventV2[]
+  total_events: number
+  redaction_level: string
+  generated_at: string
+  pdf_url: string
+  footer_disclosure: string
+}
+
+export async function getTimelineEvents(
+  childId: string,
+  params?: {
+    page?: number
+    per_page?: number
+    event_type?: string
+    seal_level?: string
+    redact?: string
+    start_date?: string
+    end_date?: string
+  },
+): Promise<TimelineResponse> {
+  const query: Record<string, string | number> = {}
+  if (params?.page) query.page = params.page
+  if (params?.per_page) query.per_page = params.per_page
+  if (params?.event_type) query.event_type = params.event_type
+  if (params?.seal_level) query.seal_level = params.seal_level
+  if (params?.redact) query.redact = params.redact
+  if (params?.start_date) query.start_date = params.start_date
+  if (params?.end_date) query.end_date = params.end_date
+  const res = await api.get<TimelineResponse>(
+    `/api/timeline/${encodeURIComponent(childId)}`,
+    { params: query },
+  )
+  return res.data
+}
+
+export async function createTimelineEvent(
+  childId: string,
+  data: CreateEventRequest,
+): Promise<CreateEventResponse> {
+  const res = await api.post<CreateEventResponse>(
+    `/api/timeline/${encodeURIComponent(childId)}/events`,
+    data,
+  )
+  return res.data
+}
+
+export async function verifyTimelineEvent(
+  childId: string,
+  eventId: number,
+  verifiedBy?: string,
+): Promise<VerifyEventResponse> {
+  const res = await api.post<VerifyEventResponse>(
+    `/api/timeline/${encodeURIComponent(childId)}/verify/${eventId}`,
+    { verified_by: verifiedBy || '' },
+  )
+  return res.data
+}
+
+export async function exportTimelinePdf(
+  childId: string,
+  redact?: string,
+): Promise<TimelineExportResponse> {
+  const params: Record<string, string> = {}
+  if (redact) params.redact = redact
+  const res = await api.get<TimelineExportResponse>(
+    `/api/timeline/${encodeURIComponent(childId)}/export/pdf`,
+    { params },
+  )
+  return res.data
+}
+
+// ── Old Timeline (legacy – kept for backward compat) ───────────────────────
 
 export interface TimelineEvent {
   date: string | null
@@ -537,6 +671,126 @@ export interface ChildTimeline {
 export async function getChildTimeline(childId: string): Promise<ChildTimeline> {
   const res = await api.get<ChildTimeline>(
     `/children/${encodeURIComponent(childId)}/timeline`
+  )
+  return res.data
+}
+
+// ── Child Digital Twin ─────────────────────────────────────────────────────
+
+export interface InterventionComponent {
+  domain: string
+  action: string
+  value: string
+  label?: string
+}
+
+export interface SimulateRequest {
+  interventions: InterventionComponent[]
+  horizon_days: number
+}
+
+export interface TrajectoryForecast {
+  outcome_distribution: Record<string, { stable: number; disrupted: number; reunified: number; runaway: number }>
+  ci_95: Record<string, Record<string, [number, number]>>
+  dominant_outcome: string
+  uncertainty_score: number
+}
+
+export interface EffectSummary {
+  effect_size: number
+  probability_of_benefit: number
+  number_needed_to_treat: number
+  ci_95: [number, number]
+  decomposition?: {
+    components?: { domain: string; alone: number }[]
+    interaction_effect?: number
+    interaction_pct?: number
+  }
+  robustness_value: number
+  sensitivity: Record<string, unknown>
+}
+
+export interface SimulateResponse {
+  simulation_id: string
+  child_id: string
+  generated_at: string
+  model_version: string
+  n_historical_placements: number
+  intervention: {
+    type: string
+    components: InterventionComponent[]
+  }
+  baseline: TrajectoryForecast
+  counterfactual: TrajectoryForecast
+  effect: EffectSummary
+}
+
+export interface TwinState {
+  child_id: string
+  placement_id: string | null
+  as_of: string
+  current_features: Record<string, unknown>
+  outcome_probs: Record<string, number> | null
+  pending_simulations: ScenarioData[] | null
+  version: number
+  stale_at: string
+}
+
+export interface ScenarioData {
+  slot: 'A' | 'B' | 'C'
+  label: string
+  simulation_id: string
+  interventions: InterventionComponent[]
+  outcome_summary: string
+  verdict: 'positive' | 'uncertain' | 'negative' | ''
+  caseworker_note: string
+  saved_at: string
+  expires_at: string
+}
+
+export async function getTwinState(childId: string): Promise<TwinState> {
+  const res = await api.get<TwinState>(
+    `/api/twin/${encodeURIComponent(childId)}/state`
+  )
+  return res.data
+}
+
+export async function runSimulation(
+  childId: string,
+  request: SimulateRequest,
+): Promise<SimulateResponse> {
+  const res = await api.post<SimulateResponse>(
+    `/api/twin/${encodeURIComponent(childId)}/simulate`,
+    request,
+  )
+  return res.data
+}
+
+export async function saveScenario(
+  childId: string,
+  slot: string,
+  scenario: {
+    slot: string
+    label: string
+    simulation_id: string
+    interventions: InterventionComponent[]
+    outcome_summary: string
+    verdict: string
+    caseworker_note: string
+  },
+): Promise<{ status: string; message: string }> {
+  const res = await api.patch<{ status: string; message: string }>(
+    `/api/twin/${encodeURIComponent(childId)}/scenarios`,
+    { slot, scenario },
+  )
+  return res.data
+}
+
+export async function getCaseConferencePdf(
+  childId: string,
+): Promise<Record<string, unknown>> {
+  const res = await api.get<Record<string, unknown>>(
+    `/api/twin/${encodeURIComponent(childId)}/case-conference-pdf`,
   )
   return res.data
 }
