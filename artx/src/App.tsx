@@ -17,6 +17,7 @@ import FairnessPage from '@/pages/fairness'
 import ChildrenPage from '@/pages/children'
 import MlAuditPage from '@/pages/ml-audit'
 import TwinPage from '@/pages/twin'
+import AgentOrchestrationPage from '@/pages/agent-orchestration'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -52,6 +53,7 @@ export default function App() {
                 <Route path="/ml-audit" element={<MlAuditPage />} />
                 <Route path="/twin" element={<TwinPage />} />
                 <Route path="/twin/:childId" element={<TwinPage />} />
+                <Route path="/orchestration" element={<AgentOrchestrationPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Routes>

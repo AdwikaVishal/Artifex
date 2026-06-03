@@ -273,6 +273,23 @@ async def approve_placement(
                         placement["child_id"], family_id,
                     )
 
+    # ── Emit workflow event so the timeline & WebSocket update live ─────
+    try:
+        await store_workflow_event(
+            approval.workflow_id,
+            stage="placement_approved" if approval.approved else "placement_rejected",
+            status="approved" if approval.approved else "rejected",
+            data={
+                "approved": approval.approved,
+                "comment": approval.comment,
+                "user_id": user["user_id"],
+                "progress": 100 if approval.approved else 0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.approve.store_event_error",
+                       workflow_id=approval.workflow_id, error=str(exc))
+
     try:
         client = await get_temporal_client()
         handle = client.get_workflow_handle(approval.workflow_id)
@@ -330,6 +347,23 @@ async def supervisor_approve(
                         "VALUES ($1, $2, NOW(), 'active', FALSE, 0)",
                         placement["child_id"], family_id,
                     )
+
+    # ── Emit workflow event so the timeline & WebSocket update live ─────
+    try:
+        await store_workflow_event(
+            approval.workflow_id,
+            stage="placement_approved" if approval.approved else "placement_rejected",
+            status="approved" if approval.approved else "rejected",
+            data={
+                "approved": approval.approved,
+                "comment": approval.comment,
+                "supervisor_id": user["user_id"],
+                "progress": 100 if approval.approved else 0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.supervisor_approve.store_event_error",
+                       workflow_id=approval.workflow_id, error=str(exc))
 
     try:
         client = await get_temporal_client()

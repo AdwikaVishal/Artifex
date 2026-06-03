@@ -16,6 +16,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from api.auth import verify_ws_token
 from api.db import get_all_placements
+from api.websockets.events import serialize_event
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -35,11 +36,13 @@ _broadcaster_lock = asyncio.Lock()
 async def _broadcast(msg: dict) -> None:
     """Send msg to all connected dashboard clients; drop dead connections."""
     dead: list[WebSocket] = []
+    payload = serialize_event(msg)
     for ws in list(_dashboard_clients):
         try:
-            await ws.send_json(msg)
+            await ws.send_json(payload)
         except Exception:  # noqa: BLE001
             dead.append(ws)
+            logger.warning("ws.dashboard.broadcast_failed")
     for ws in dead:
         _dashboard_clients.discard(ws)
 
@@ -94,7 +97,8 @@ async def _poll_loop(websocket: WebSocket) -> None:
     while True:
         try:
             placements = await get_all_placements()
-            await websocket.send_json({"placements": placements, "count": len(placements)})
+            payload = serialize_event({"placements": placements, "count": len(placements)})
+            await websocket.send_json(payload)
         except Exception:  # noqa: BLE001
             break
         await asyncio.sleep(2)
@@ -124,9 +128,10 @@ async def websocket_dashboard(
     # Send an immediate snapshot so the client doesn't wait for the next NATS event
     try:
         placements = await get_all_placements()
-        await websocket.send_json({"placements": placements, "count": len(placements)})
+        payload = serialize_event({"placements": placements, "count": len(placements)})
+        await websocket.send_json(payload)
     except Exception:  # noqa: BLE001
-        pass
+        logger.warning("ws.dashboard.snapshot_failed")
 
     try:
         # Keepalive loop – NATS broadcaster handles actual data pushes.
@@ -138,6 +143,7 @@ async def websocket_dashboard(
                 try:
                     await websocket.send_json({"type": "ping"})
                 except Exception:  # noqa: BLE001
+                    logger.warning("ws.dashboard.ping_failed")
                     break
         finally:
             poll_task.cancel()

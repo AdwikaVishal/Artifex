@@ -3,7 +3,9 @@ import type {
   ReferralSubmission,
   ReferralResponse,
   WorkflowStatus,
+  WorkflowStage,
   PendingApproval,
+  AgentStatus,
   PendingApprovalsResponse,
   ApproveRequest,
   ApproveResponse,
@@ -199,6 +201,7 @@ function buildStagesFromTimeline(
     }
 
     return {
+      stage: name.toLowerCase().replace(/\s+/g, '_'),
       name: name.toLowerCase().replace(/\s+/g, '_'),
       label: name,
       status,
@@ -229,21 +232,22 @@ export async function getWorkflowStatus(workflowId: string): Promise<WorkflowSta
 
   const d = res.data || {}
   const now = new Date().toISOString()
-  const timeline = d.timeline || []
+  const timeline = Array.isArray(d.timeline) ? d.timeline : []
+  const recommendedFamily = d.recommended_family ?? d.recommendation ?? null
 
   const normalizedStatus: WorkflowStatus = {
     workflow_id: d.workflow_id || normalized,
     child_id: d.child_id || '',
     family_id: d.family_id || '',
     status: d.status || 'unknown',
-    current_stage: d.current_stage || '',
+    current_stage: d.current_stage || d.stage || (timeline[0] && (timeline[0].stage || timeline[0].name)) || 'Unknown',
     stages: buildStagesFromTimeline(timeline, d.current_stage || ''),
     risk_score: d.risk_score ?? null,
     match_score: d.match_score ?? null,
     confidence_score: d.confidence_score ?? null,
-    recommended_family: d.recommended_family || null,
+    recommended_family: recommendedFamily || null,
     capacity: d.capacity ?? null,
-    progress: d.progress ?? 0,
+    progress: typeof d.progress === 'number' ? d.progress : 0,
     timeline,
     feature_importance: d.feature_importance || null,
     top_matches: d.top_matches || null,
@@ -433,6 +437,19 @@ export async function getWorkflowActivity(): Promise<WorkflowActivityEntry[]> {
 
 export async function getAgentStatuses(): Promise<AgentStatusMap> {
   const res = await api.get<AgentStatusMap>('/agent/status')
+  return res.data
+}
+
+export interface AgentDetail {
+  id: string
+  name: string
+  type: string
+  status: string
+  last_heartbeat_age_s: number | null
+}
+
+export async function getAgents(): Promise<{ agents: Record<string, AgentDetail> }> {
+  const res = await api.get<{ agents: Record<string, AgentDetail> }>('/api/agents')
   return res.data
 }
 
@@ -782,6 +799,15 @@ export async function saveScenario(
   const res = await api.patch<{ status: string; message: string }>(
     `/api/twin/${encodeURIComponent(childId)}/scenarios`,
     { slot, scenario },
+  )
+  return res.data
+}
+
+export async function getScenarios(
+  childId: string,
+): Promise<{ scenarios: ScenarioData[] }> {
+  const res = await api.get<{ scenarios: ScenarioData[] }>(
+    `/api/twin/${encodeURIComponent(childId)}/scenarios`,
   )
   return res.data
 }

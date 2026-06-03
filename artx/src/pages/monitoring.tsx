@@ -177,7 +177,7 @@ export default function MonitoringPage() {
                   <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6b6b80', fontSize: 11 }} width={80} />
                   <Tooltip
                     contentStyle={{ background: '#1a1a24', border: '1px solid #2a2a3d', borderRadius: '8px', fontSize: '12px' }}
-                    formatter={(v: number) => [`${v}ms`, 'Latency']}
+                    formatter={(v: any) => [`${v ?? 0}ms`, 'Latency']}
                   />
                   <Bar dataKey="latency" radius={[0, 4, 4, 0]}>
                     {latencyData.map((entry, i) => (

@@ -148,8 +148,14 @@ if nc -z 127.0.0.1 5173 2>/dev/null; then
   warn "Port 5173 already in use – skipping Vite start"
 else
   cd "$FRONTEND_DIR"
-  node_modules/.bin/vite \
-    > "$LOG_DIR/frontend.log" 2>&1 &
+  if [[ -x "$FRONTEND_DIR/node_modules/.bin/vite" ]]; then
+    "$FRONTEND_DIR/node_modules/.bin/vite" > "$LOG_DIR/frontend.log" 2>&1 &
+  elif command -v npx >/dev/null 2>&1; then
+    npx vite > "$LOG_DIR/frontend.log" 2>&1 &
+  else
+    error "No Vite binary found in node_modules or npx – run 'npm install' in artx/"
+    exit 1
+  fi
   echo $! >> "$PID_FILE"
   wait_for_port "Vite" 5173 30
 fi

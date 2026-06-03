@@ -312,7 +312,7 @@ function CrisisAlertsPanel() {
               <p className="text-xs text-muted-foreground font-mono mb-1.5">
                 {p.child_id} · {p.workflow_id}
               </p>
-              <CrisisAlertCard placementId={p.workflow_id} />
+              {p.workflow_id ? <CrisisAlertCard placementId={p.workflow_id} /> : null}
             </div>
           ))}
         </div>

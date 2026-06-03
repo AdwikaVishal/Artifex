@@ -193,7 +193,7 @@ function DotShape({ path, className }: { path: string; className?: string }) {
 
 /** Build a plain‑English label for an event's payload summary. */
 function eventPayloadSummary(event: TimelineEvent): string {
-  const p = event.payload
+  const p = event.payload as Record<string, any>
   switch (event.event_type) {
     case 'placement_start':
     case 'placement_end':

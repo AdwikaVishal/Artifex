@@ -37,7 +37,9 @@ export default function FamiliesPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [form, setForm] = useState<FamilyCreate>(emptyForm)
 
-  const editingFamily = editingId && families?.find(f => f.family_id === editingId)
+  const editingFamily = editingId
+    ? families?.find((f): f is Family => f.family_id === editingId) ?? null
+    : null
 
   const resetForm = () => setForm(emptyForm)
 

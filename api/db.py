@@ -10,10 +10,13 @@ import logging
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
 import structlog
+
+from api.websockets.events import broadcast_workflow_event
 
 logger = structlog.get_logger()
 _process_logger = logging.getLogger("artifex.db")
@@ -130,6 +133,7 @@ async def store_workflow_event(
             workflow_id, stage, status, json.dumps(safe_data),
         )
         progress = int(safe_data.get("progress", 0))
+        timestamp = safe_data.get("timestamp") or safe_data.get("updated_at") or datetime.now(timezone.utc).isoformat()
         await conn.execute(
             "INSERT INTO workflow_status "
             "  (workflow_id, status, current_stage, progress, metadata, updated_at) "
@@ -140,6 +144,22 @@ async def store_workflow_event(
             "  metadata=COALESCE(EXCLUDED.metadata, workflow_status.metadata), "
             "  updated_at=NOW()",
             workflow_id, status, stage, progress, json.dumps(safe_data),
+        )
+
+        timeline = await get_workflow_timeline(workflow_id, limit=200)
+        await broadcast_workflow_event(
+            workflow_id,
+            {
+                "type": "workflow_event",
+                "workflow_id": workflow_id,
+                "stage": stage,
+                "status": status,
+                "progress": progress,
+                "timestamp": timestamp,
+                "current_stage": stage,
+                "payload": safe_data,
+                "timeline": timeline,
+            },
         )
 
 

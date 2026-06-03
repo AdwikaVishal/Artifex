@@ -1,478 +1,575 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import api from '@/services/api'
-import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
+import { GlassCard } from '@/components/ui/glass-card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { StatusBadge } from '@/components/ui/badge'
-import { AnimatedProgressSteps } from '@/components/ui/progress'
 import { DataLoader } from '@/components/data-loader'
-import { Separator } from '@/components/ui/separator'
-import { formatDate, getStageLabel } from '@/lib/utils'
+import { formatDate } from '@/lib/utils'
 import { normalizeWorkflowId, subscribeWorkflowStream } from '@/services/foster'
-import { motion } from 'framer-motion'
-import { Search, Clock, AlertCircle, RefreshCw, ArrowLeft } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  Search, ArrowLeft, RefreshCw, Bot, MessageSquare, BrainCircuit,
+  Clock, Timer, ListChecks,
+} from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { WorkflowStatus, WorkflowStage } from '@/types'
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { cn } from '@/lib/utils'
+import type { TimelineEvent, StageStatus, ExecutionMetrics, ReasoningEntry } from '@/types/workflow-timeline'
+import { MOCK_TIMELINE_EVENTS, MOCK_REASONING_ENTRIES } from '@/types/workflow-timeline'
+import ExecutionMetricsBar from '@/components/workflow-timeline/ExecutionMetricsBar'
+import TimelineList from '@/components/workflow-timeline/TimelineList'
+import AgentActivityPanel from '@/components/workflow-timeline/AgentActivityPanel'
+import AIReasoningFeed from '@/components/workflow-timeline/AIReasoningFeed'
+import TimelineDetailDrawer from '@/components/workflow-timeline/TimelineDetailDrawer'
+import ReplayButton from '@/components/workflow-timeline/ReplayButton'
 
 function formatPercent(value?: number | null, decimals = 0): string {
-  if (value == null || Number.isNaN(value)) return '—'
+  if (value == null || Number.isNaN(value)) return '\u2014'
   const normalized = value <= 1 ? value * 100 : value
   return `${Number(normalized.toFixed(decimals))}%`
 }
 
 function formatRiskScore(value?: number | null): string {
-  if (value == null || Number.isNaN(value)) return '—'
+  if (value == null || Number.isNaN(value)) return '\u2014'
   const normalized = value <= 1 ? value * 100 : value
   return `${normalized.toFixed(normalized < 10 ? 2 : 0)}%`
 }
 
-function normalizeTimelineEvents(events: WorkflowStage[]): WorkflowStage[] {
-  // Deduplicate: for each stage, keep the most meaningful status
-  // (completed > in_progress > failed > pending) to avoid duplicate React keys
+function apiEventsToTimeline(events: WorkflowStage[]): TimelineEvent[] {
+  const STATUS_MAP: Record<string, StageStatus> = {
+    completed: 'completed', in_progress: 'in_progress', failed: 'failed',
+    pending: 'pending', active: 'in_progress', running: 'in_progress',
+  }
   const STATUS_RANK: Record<string, number> = {
     completed: 4, in_progress: 3, failed: 2, pending: 1,
   }
-  const seen = new Map<string, WorkflowStage>()
-  for (const event of events || []) {
-    const stageName = event.stage || event.name || ''
+
+  const seen = new Map<string, TimelineEvent>()
+  let eventIndex = 0
+
+  for (const e of events || []) {
+    const stageName = e.stage || e.name || ''
+    if (!stageName) continue
+    const status = STATUS_MAP[e.status] || 'pending'
     const existing = seen.get(stageName)
-    const rank = STATUS_RANK[event.status] ?? 0
+    const rank = STATUS_RANK[status] ?? 0
     const existingRank = existing ? (STATUS_RANK[existing.status] ?? 0) : -1
     if (!existing || rank > existingRank) {
-      seen.set(stageName, event)
+      const raw = e.label || e.stage?.replace(/_/g, ' ') || e.name?.replace(/_/g, ' ') || stageName
+      const label = raw.charAt(0).toUpperCase() + raw.slice(1)
+      seen.set(stageName, {
+        id: `api-${stageName}-${eventIndex++}`,
+        stage: stageName, label, status,
+        agentName: '', agentAction: '', agentOutput: '',
+        latency: 0, confidenceScore: 0, reasoning: [],
+        timestamp: e.timestamp || e.started_at,
+        startedAt: e.started_at, completedAt: e.completed_at,
+        details: e.details || (e.data && typeof e.data === 'object'
+          ? (typeof e.data.message === 'string' ? e.data.message
+            : typeof e.data.details === 'string' ? e.data.details
+            : JSON.stringify(e.data))
+          : typeof e.data === 'string' ? e.data : undefined),
+      })
     }
   }
 
-  return Array.from(seen.values()).map((event, index) => {
-    const stageName = event.stage || event.name || `event-${index}`
-    const label = event.label || getStageLabel(event.stage || event.name || '') || String(stageName)
-    const details = event.details ||
-      (event.data && typeof event.data === 'object'
-        ? (typeof event.data.message === 'string'
-            ? event.data.message
-            : typeof event.data.details === 'string'
-              ? event.data.details
-              : JSON.stringify(event.data))
-        : typeof event.data === 'string'
-          ? event.data
-          : undefined)
-    return {
-      ...event,
-      name: event.name || String(stageName),
-      label,
-      started_at: event.started_at || event.timestamp,
-      details,
-    }
+  let idx = 0
+  return Array.from(seen.values()).map((event) => ({ ...event, id: `api-${event.stage}-${idx++}` }))
+}
+
+function sortTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
+  const RANK: Record<string, number> = { completed: 4, in_progress: 3, failed: 2, pending: 1 }
+  return [...events].sort((a, b) => {
+    const r = (RANK[b.status] ?? 0) - (RANK[a.status] ?? 0)
+    if (r !== 0) return r
+    return (a.timestamp ? new Date(a.timestamp).getTime() : 0) - (b.timestamp ? new Date(b.timestamp).getTime() : 0)
   })
 }
 
-function TimelineView({ timeline }: { timeline: WorkflowStage[] }) {
-  if (!timeline?.length) {
-    return <p className="text-sm text-muted-foreground">No timeline events are available yet.</p>
+function computeMetrics(events: TimelineEvent[], elapsed: number): ExecutionMetrics {
+  const completed = events.filter((e) => e.status === 'completed').length
+  const inProgress = events.filter((e) => e.status === 'in_progress').length
+  const total = Math.max(events.length, 1)
+  const progress = total > 0 ? (completed / total) * 100 : 0
+  return {
+    progress,
+    completedStages: completed,
+    totalStages: total,
+    executionTime: elapsed,
+    activeAgents: inProgress,
+    messagesExchanged: events.reduce((s, e) => s + (e.reasoning?.length || 0) + (e.logs?.length || 0), 0),
+    riskScore: 45, matchScore: 30,
+    confidenceScore: completed > 0
+      ? Math.round(events.filter((e) => e.status === 'completed').reduce((s, e) => s + e.confidenceScore, 0) / completed)
+      : 0,
   }
-
-  return (
-    <div className="space-y-3">
-      {timeline.map((stage, i) => {
-        const isCompleted = stage.status === 'completed'
-        const isActive = stage.status === 'in_progress'
-        const isFailed = stage.status === 'failed'
-        return (
-          <div key={`${stage.name || stage.stage || 'stage'}-${i}`} className="flex gap-4">
-            <div className="flex flex-col items-center">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all duration-300 ${
-                isCompleted ? 'bg-primary border-primary text-white' :
-                isActive ? 'border-primary text-primary bg-primary/10' :
-                isFailed ? 'border-destructive text-destructive bg-destructive/10' :
-                'border-border-light text-muted bg-surface-alt'
-              }`}>
-                {isCompleted ? '✓' : isFailed ? '✕' : i + 1}
-              </div>
-              {i < timeline.length - 1 && (
-                <div className={`w-0.5 flex-1 mt-1 ${isCompleted ? 'bg-primary/40' : 'bg-border'}`} />
-              )}
-            </div>
-            <div className="flex-1 pb-6">
-              <div className="flex items-center gap-2 mb-1">
-                <span className={`text-sm font-medium ${
-                  isCompleted ? 'text-primary' : isActive ? 'text-foreground' : isFailed ? 'text-destructive' : 'text-muted'
-                }`}>
-                  {stage.label || stage.name}
-                </span>
-                <StatusBadge status={stage.status} />
-              </div>
-              {stage.started_at && (
-                <p className="text-xs text-muted-foreground flex items-center gap-1">
-                  <Clock size={10} />
-                  {formatDate(stage.started_at)}
-                </p>
-              )}
-              {stage.details && <p className="text-xs text-muted-foreground mt-1">{stage.details}</p>}
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function StageMetrics({ timeline, progress }: { timeline: WorkflowStage[]; progress: number }) {
-  const completed = timeline.filter((s) => s.status === 'completed').length
-  const failed = timeline.filter((s) => s.status === 'failed').length
-  const total = timeline.length
-
-  return (
-    <div className="grid grid-cols-3 gap-4">
-      <div className="text-center">
-        <p className="text-2xl font-bold text-foreground">{completed}/{total}</p>
-        <p className="text-xs text-muted-foreground mt-1">Events Completed</p>
-      </div>
-      <div className="text-center">
-        <p className="text-2xl font-bold text-primary">{formatPercent(progress)}</p>
-        <p className="text-xs text-muted-foreground mt-1">Workflow Progress</p>
-      </div>
-      <div className="text-center">
-        <p className="text-2xl font-bold text-destructive">{failed}</p>
-        <p className="text-xs text-muted-foreground mt-1">Failures</p>
-      </div>
-    </div>
-  )
 }
 
 function extractWorkflowIdFromPath(): string {
-  const match = window.location.pathname.match(/\/workflow\/(.+)/)
-  if (match && match[1]) {
-    return decodeURIComponent(match[1])
-  }
-  return ''
+  const m = window.location.pathname.match(/\/workflow\/(.+)/)
+  return m?.[1] ? decodeURIComponent(m[1]) : ''
 }
+
+const REPLAY_DELAYS = [1, 5, 9.5, 14.5, 20, 25.5, 31, 36.5, 42, 47]
+const REPLAY_TOTAL_STEPS = MOCK_TIMELINE_EVENTS.length
 
 export default function WorkflowTrackingPage() {
   const params = useParams<{ workflowId: string }>()
   const navigate = useNavigate()
-
   const routeWorkflowId = params.workflowId || extractWorkflowIdFromPath()
   const initialNormalized = routeWorkflowId ? normalizeWorkflowId(routeWorkflowId) : ''
 
   const [workflowId, setWorkflowId] = useState(initialNormalized)
   const [searchInput, setSearchInput] = useState(routeWorkflowId || '')
   const queryClient = useQueryClient()
+  const wsSubscriptionRef = useRef<ReturnType<typeof subscribeWorkflowStream> | null>(null)
+  const [selectedStageId, setSelectedStageId] = useState<string | null>(null)
+  const [drawerStageId, setDrawerStageId] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<'activity' | 'reasoning'>('activity')
 
-  // Fix ④: track the timestamp of the most recent WebSocket push so the
-  // 5-second REST poll never overwrites data that is already fresher.
-  const wsLastUpdatedRef = useRef<number>(0)
+  const [isReplaying, setIsReplaying] = useState(false)
+  const [hasReplayed, setHasReplayed] = useState(false)
+  const [replayStep, setReplayStep] = useState(-1)
+  const [elapsed, setElapsed] = useState(0)
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startTimeRef = useRef(0)
 
-  console.log(`[workflow-tracking] render — route param: "${params.workflowId}", path-derived: "${extractWorkflowIdFromPath()}", state: "${workflowId}"`)
+  // ── Incrementally-built live timeline (separate from REST snapshot) ─────
+  // Each incoming WS event appends ONE item so AnimatePresence can detect
+  // new insertions and play the entrance animation.
+  const [liveEvents, setLiveEvents] = useState<TimelineEvent[]>([])
+  const seenEventKeys = useRef<Set<string>>(new Set())
+  const liveInitialised = useRef(false)
+
+  const clearAllTimers = useCallback(() => {
+    timersRef.current.forEach(clearTimeout)
+    timersRef.current = []
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+  }, [])
 
   useEffect(() => {
     const id = params.workflowId || extractWorkflowIdFromPath()
     if (id) {
       const normalized = normalizeWorkflowId(id)
-      console.log(`[workflow-tracking] route effect — "${id}" -> normalized "${normalized}"`)
       setWorkflowId(normalized)
       setSearchInput(id)
-      if (normalized !== id) {
-        navigate(`/workflow/${normalized}`, { replace: true })
-      }
+      if (normalized !== id) navigate(`/workflow/${normalized}`, { replace: true })
     }
   }, [params.workflowId, navigate])
 
-  const {
-    data: workflow,
-    isLoading,
-    error,
-    refetch,
-  } = useQuery<WorkflowStatus>({
+  const { data: workflow, isLoading, error, refetch } = useQuery<WorkflowStatus>({
     queryKey: ['workflow-status', workflowId],
     queryFn: async () => {
       if (!workflowId) throw new Error('No workflow ID provided')
-      const url = `/foster/status/${encodeURIComponent(workflowId)}`
-      console.log(`[workflow-tracking] 🔍 executing queryFn — GET ${url}`)
-      const response = await api.get<WorkflowStatus>(url)
-      console.log(`[workflow-tracking] ✅ queryFn response:`, response.data)
-      console.log(`[workflow-tracking] workflow.status type: ${typeof response.data?.status} value:`, response.data?.status)
-      // Fix ④: if a WebSocket push arrived in the last 3 s, keep that data
-      // and discard this (potentially stale) REST snapshot.
-      const age = Date.now() - wsLastUpdatedRef.current
-      if (age < 3000) {
-        console.log(`[workflow-tracking] skipping REST update — WS data is ${age}ms old`)
-        const cached = queryClient.getQueryData<WorkflowStatus>(['workflow-status', workflowId])
-        if (cached) return cached
-      }
-      return response.data
+      const res = await api.get<WorkflowStatus>(`/foster/status/${encodeURIComponent(workflowId)}`)
+      return {
+        ...res.data,
+        status: res.data?.status || 'unknown',
+        current_stage: res.data?.current_stage || 'Unknown',
+        progress: typeof res.data?.progress === 'number' ? res.data.progress : 0,
+        timeline: Array.isArray(res.data?.timeline) ? res.data.timeline : [],
+      } as WorkflowStatus
     },
-    enabled: workflowId !== null && workflowId !== undefined && workflowId.trim().length > 0,
-    refetchInterval: 5000,
-    retry: 3,
-    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 10000),
+    enabled: !!workflowId?.trim(),
+    refetchOnWindowFocus: false,
+    staleTime: 30_000,
+    retry: 1,
+    retryDelay: (a) => Math.min(1000 * 2 ** a, 4000),
   })
 
   useEffect(() => {
-    if (workflowId) {
-      console.log(`[workflow-tracking] query key updated — watching workflowId: "${workflowId}"`)
-    }
-  }, [workflowId])
+    if (!workflowId || isReplaying) return
+    if (wsSubscriptionRef.current) { wsSubscriptionRef.current.close(); wsSubscriptionRef.current = null }
+    // Reset live state for a new workflow
+    setLiveEvents([])
+    seenEventKeys.current = new Set()
+    liveInitialised.current = false
 
-  useEffect(() => {
-    if (workflow) {
-      console.log('[workflow-tracking] rendering — workflow:', workflow)
-      console.log('[workflow-tracking] API response timeline:', workflow.timeline)
-      console.log('[workflow-tracking] current_stage:', workflow.current_stage)
-      console.log('[workflow-tracking] progress:', workflow.progress)
-    }
-  }, [workflow])
-
-  // Subscribe to per-workflow WebSocket stream for live updates
-  useEffect(() => {
-    if (!workflowId) return
-    const sub = subscribeWorkflowStream(
-      workflowId,
+    const sub = subscribeWorkflowStream(workflowId,
       (msg) => {
-        console.log('[workflow-tracking] ws message', msg)
-        // Fix ④: stamp the time so the REST poll knows WS data is fresh
-        wsLastUpdatedRef.current = Date.now()
+        // 1. Always update the React Query cache with status metadata
         queryClient.setQueryData(['workflow-status', workflowId], (current) => {
           const existing = (current as WorkflowStatus) || {
-            workflow_id: workflowId,
-            status: 'unknown',
-            active: true,
-            progress: 0,
-            timeline: [],
-            stages: [],
+            workflow_id: workflowId, status: 'unknown', active: true, progress: 0, timeline: [], stages: [],
           }
           return {
-            ...existing,
-            ...msg,
-            timeline: msg.timeline ?? existing.timeline,
+            ...existing, ...msg,
+            status: msg.status || existing.status || 'unknown',
+            current_stage: msg.current_stage || existing.current_stage || 'Unknown',
+            progress: typeof msg.progress === 'number' ? msg.progress : existing.progress || 0,
+            // Don't replace timeline from event messages – we build it incrementally below
+            timeline: existing.timeline || [],
             stages: existing.stages || [],
           } as WorkflowStatus
         })
-      },
-      () => console.log('[workflow-tracking] ws open'),
-      () => console.log('[workflow-tracking] ws close'),
-    )
-    return () => sub.close()
-  }, [workflowId, queryClient])
 
-  const timelineItems = workflow ? normalizeTimelineEvents(workflow.timeline || []) : []
-  const formattedMatchScore = formatPercent(workflow?.match_score ?? null)
-  const formattedConfidence = formatPercent(workflow?.confidence_score ?? null)
-  const formattedRiskScore = formatRiskScore(workflow?.risk_score ?? null)
-  const progressValue = workflow?.progress ?? 0
+        // 2. Build the live timeline incrementally
+        if (msg.type === 'workflow_snapshot') {
+          // Seed from the DB snapshot
+          const dbTimeline = Array.isArray(msg.timeline) ? msg.timeline : []
+          const converted = sortTimelineEvents(apiEventsToTimeline(dbTimeline))
+          // Pre-populate the seen-keys set so subsequent live events are truly new
+          for (const ev of converted) {
+            seenEventKeys.current.add(`${ev.stage}:${ev.status}`)
+          }
+          setLiveEvents(converted)
+          liveInitialised.current = true
+          return
+        }
+
+        if (msg.type === 'workflow_event' && liveInitialised.current) {
+          const stageName = (msg.stage || '').toLowerCase().replace(/\s+/g, '_')
+          const status = msg.status || 'in_progress'
+          const key = `${stageName}:${status}`
+          // Deduplicate: skip if this exact stage+status combo has been seen
+          if (seenEventKeys.current.has(key)) return
+          seenEventKeys.current.add(key)
+
+          const raw = (msg.stage || '').replace(/_/g, ' ')
+          const label = raw.charAt(0).toUpperCase() + raw.slice(1)
+
+          const newEvent: TimelineEvent = {
+            id: `live-${stageName}-${status}-${Date.now()}`,
+            stage: stageName,
+            label,
+            status: status as StageStatus,
+            agentName: msg.payload?.agent || '',
+            agentAction: msg.payload?.action || '',
+            agentOutput: msg.payload?.output || '',
+            latency: typeof msg.payload?.latency === 'number' ? msg.payload.latency : 0,
+            confidenceScore: typeof msg.payload?.confidence === 'number'
+              ? Math.round(msg.payload.confidence * 100)
+              : typeof msg.payload?.confidence_score === 'number'
+                ? Math.round(msg.payload.confidence_score)
+                : 0,
+            reasoning: msg.payload?.reasoning || [],
+            timestamp: msg.timestamp,
+            startedAt: msg.timestamp,
+            completedAt: status === 'completed' ? msg.timestamp : undefined,
+            details: msg.payload?.message || msg.payload?.details || undefined,
+          }
+
+          setLiveEvents((prev) => {
+            const updated = sortTimelineEvents([...prev, newEvent])
+            return updated
+          })
+        }
+      },
+      () => {}, () => {},
+    )
+    wsSubscriptionRef.current = sub
+    return () => { sub.close(); wsSubscriptionRef.current = null }
+  }, [workflowId, queryClient, isReplaying])
+
+  const timelineEvents = useMemo(() => {
+    if (isReplaying) return MOCK_TIMELINE_EVENTS.filter((_, i) => i <= replayStep)
+    return liveEvents
+  }, [isReplaying, replayStep, liveEvents])
+
+  const selectedStage = useMemo(
+    () => timelineEvents.find((e) => e.id === selectedStageId) || null,
+    [timelineEvents, selectedStageId],
+  )
+
+  const drawerStage = useMemo(() => {
+    const combined = isReplaying ? MOCK_TIMELINE_EVENTS : timelineEvents
+    return combined.find((e) => e.id === drawerStageId) || null
+  }, [drawerStageId, isReplaying, timelineEvents])
+
+  const metrics = useMemo(() => computeMetrics(timelineEvents, elapsed), [timelineEvents, elapsed])
+
+  const reasoningEntries = useMemo<ReasoningEntry[]>(() => {
+    if (!isReplaying) return []
+    const ratio = replayStep / REPLAY_TOTAL_STEPS
+    return MOCK_REASONING_ENTRIES.slice(0, Math.max(1, Math.floor(ratio * MOCK_REASONING_ENTRIES.length)))
+  }, [isReplaying, replayStep])
+
+  useEffect(() => {
+    if (timelineEvents.length > 0) {
+      const active = timelineEvents.find((e) => e.status === 'in_progress')
+      if (active) setSelectedStageId(active.id)
+      else {
+        const last = timelineEvents[timelineEvents.length - 1]
+        if (last) setSelectedStageId(last.id)
+      }
+    }
+  }, [timelineEvents])
+
+  const handleReplay = useCallback(() => {
+    if (isReplaying) {
+      clearAllTimers()
+      setIsReplaying(false); setReplayStep(-1); setElapsed(0)
+      setSelectedStageId(null); setDrawerStageId(null)
+      return
+    }
+    setHasReplayed(true)
+    setIsReplaying(true); setReplayStep(-1); setElapsed(0)
+    startTimeRef.current = Date.now()
+    intervalRef.current = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
+    }, 200)
+
+    const scheduleNext = (step: number) => {
+      if (step >= REPLAY_TOTAL_STEPS) {
+        setTimeout(() => { setIsReplaying(false); if (intervalRef.current) clearInterval(intervalRef.current) }, 2000)
+        return
+      }
+      const delayMs = step === 0
+        ? REPLAY_DELAYS[0] * 1000
+        : (REPLAY_DELAYS[step] - REPLAY_DELAYS[step - 1]) * 1000
+      const timer = setTimeout(() => {
+        setReplayStep(step)
+        if (step < MOCK_TIMELINE_EVENTS.length) setSelectedStageId(MOCK_TIMELINE_EVENTS[step].id)
+        scheduleNext(step + 1)
+      }, delayMs)
+      timersRef.current.push(timer)
+    }
+    scheduleNext(0)
+  }, [isReplaying, clearAllTimers])
 
   const handleSearch = useCallback(() => {
     const raw = searchInput.trim()
     if (raw) {
       const normalized = normalizeWorkflowId(raw)
-      console.log(`[workflow-tracking] search — "${raw}" -> normalized "${normalized}"`)
       setWorkflowId(normalized)
       navigate(`/workflow/${normalized}`, { replace: true })
+      setIsReplaying(false); setHasReplayed(false); setReplayStep(-1)
     }
   }, [searchInput, navigate])
 
+  const handleStageClick = useCallback((id: string) => {
+    setSelectedStageId(id)
+    setDrawerStageId(id)
+  }, [])
+
+  useEffect(() => () => clearAllTimers(), [clearAllTimers])
+
+  const progressPct = Math.round(metrics.progress)
+  const showContent = !!workflowId && (!!workflow || isReplaying || isLoading || !!error)
+
   return (
-    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors">
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
+      <div className="flex items-center gap-4 flex-wrap">
+        <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors shrink-0">
           <ArrowLeft size={20} />
         </Link>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold text-foreground">Workflow Tracking</h1>
-          <p className="text-sm text-muted-foreground mt-1">Track the real-time status of orchestration workflows</p>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl lg:text-2xl font-bold text-foreground">Workflow Timeline</h1>
+            {isReplaying && (
+              <span className="px-2 py-0.5 rounded-full bg-warning/10 border border-warning/20 text-warning text-[10px] font-semibold font-mono uppercase tracking-wider animate-pulse">
+                Replay Mode
+              </span>
+            )}
+            {workflow?.status && !isReplaying && <StatusBadge status={workflow.status} />}
+          </div>
+          <p className="text-xs sm:text-sm text-muted-foreground mt-0.5">
+            {isReplaying
+              ? 'AI agent collaboration during foster placement decision-making'
+              : 'Real-time AI orchestration pipeline with live agent activity'}
+          </p>
         </div>
       </div>
 
-      <GlassCard>
-        <div className="flex gap-3">
-          <div className="flex-1">
-            <Input
-              placeholder="Workflow ID (e.g. foster-3001)"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-            />
+      <GlassCard className="p-4">
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="flex-1 flex gap-2">
+            <div className="flex-1">
+              <Input
+                placeholder="Workflow ID (e.g. foster-3001)"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              />
+            </div>
+            <Button onClick={handleSearch} loading={isLoading && !isReplaying} variant="secondary" size="sm">
+              <Search size={14} />
+              <span className="hidden sm:inline">Search</span>
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => refetch()} disabled={isReplaying}>
+              <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+            </Button>
           </div>
-          <Button onClick={handleSearch} loading={isLoading}>
-            <Search size={16} />
-            Search
-          </Button>
+          <div className="flex items-center gap-2">
+            {isReplaying && (
+              <motion.div
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface-alt border border-border text-xs text-muted-foreground"
+              >
+                <Timer size={12} />
+                <span className="font-mono">
+                  {String(Math.floor(elapsed / 60)).padStart(2, '0')}:{String(elapsed % 60).padStart(2, '0')}
+                </span>
+              </motion.div>
+            )}
+            <ReplayButton isReplaying={isReplaying} hasReplayed={hasReplayed} onToggle={handleReplay} disabled={false} />
+          </div>
         </div>
-        {workflowId && (
-          <p className="text-xs text-muted-foreground mt-2">
-            Tracking: <span className="font-mono text-foreground">{workflowId}</span>
-          </p>
+        {workflowId && !isReplaying && (
+          <div className="flex items-center gap-2 mt-2">
+            <span className="text-[10px] text-muted-foreground font-mono">
+              Workflow: <span className="text-foreground">{workflowId}</span>
+            </span>
+            {workflow?.child_id && (
+              <>
+                <span className="text-muted">|</span>
+                <span className="text-[10px] text-muted-foreground font-mono">
+                  Child: <span className="text-foreground">{workflow.child_id}</span>
+                </span>
+              </>
+            )}
+            {workflow?.created_at && (
+              <>
+                <span className="text-muted">|</span>
+                <span className="text-[10px] text-muted-foreground font-mono">
+                  Created: <span className="text-foreground">{formatDate(workflow.created_at)}</span>
+                </span>
+              </>
+            )}
+          </div>
         )}
       </GlassCard>
 
-      {workflowId && (
-        <DataLoader isLoading={isLoading} error={error} refetch={refetch}>
-          {workflow ? (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <GlassCard className="lg:col-span-2">
-                  <GlassCardHeader>
-                    <GlassCardTitle>Workflow Overview</GlassCardTitle>
-                  </GlassCardHeader>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Workflow ID</p>
-                      <p className="text-sm font-mono text-foreground mt-1 break-all">{workflow.workflow_id}</p>
+      {showContent ? (
+        <DataLoader isLoading={isLoading && !isReplaying && !!workflowId} error={!isReplaying ? error : null} refetch={refetch}>
+          {timelineEvents.length > 0 || isReplaying || workflow ? (
+            <div className="space-y-5">
+              <ExecutionMetricsBar metrics={metrics} loading={false} />
+
+              <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-5 min-h-0">
+                <GlassCard className="p-0 overflow-hidden">
+                  <div className="flex items-center justify-between px-5 py-3 border-b border-glass-border">
+                    <div className="flex items-center gap-2">
+                      <ListChecks size={14} className="text-primary" />
+                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                        Pipeline Stages
+                      </span>
                     </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Child ID</p>
-                      <p className="text-sm font-mono text-foreground mt-1">{workflow.child_id || '—'}</p>
+                    <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                        {metrics.completedStages} done
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-info" />
+                        {metrics.activeAgents} active
+                      </span>
                     </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Status</p>
-                      <div className="mt-1"><StatusBadge status={workflow.status} /></div>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Family ID</p>
-                      <p className="text-sm font-mono text-foreground mt-1">{workflow.family_id || '—'}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Match Score</p>
-                      <p className="text-sm font-mono text-foreground mt-1">{formattedMatchScore}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Confidence</p>
-                      <p className="text-sm font-mono text-foreground mt-1">{formattedConfidence}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Current Stage</p>
-                      <p className="text-sm text-foreground mt-1">{workflow.current_stage || 'Unknown'}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Created</p>
-                      <p className="text-sm text-muted-foreground mt-1">{formatDate(workflow.created_at)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Updated</p>
-                      <p className="text-sm text-muted-foreground mt-1">{formatDate(workflow.updated_at)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Risk Score</p>
-                      <p className="text-sm font-mono text-foreground mt-1">{formattedRiskScore}</p>
-                    </div>
-                    {workflow.recommended_family && (
-                      <div>
-                        <p className="text-xs text-muted-foreground">Recommended Family</p>
-                        <p className="text-sm text-foreground mt-1">
-                          {typeof workflow.recommended_family === 'string'
-                            ? workflow.recommended_family
-                            : JSON.stringify(workflow.recommended_family)}
-                        </p>
-                      </div>
-                    )}
-                    {workflow.capacity !== undefined && workflow.capacity !== null && (
-                      <div>
-                        <p className="text-xs text-muted-foreground">Capacity</p>
-                        <p className="text-sm text-foreground mt-1">{workflow.capacity}</p>
-                      </div>
-                    )}
+                  </div>
+                  <div className="p-5 max-h-[600px] overflow-y-auto">
+                    <TimelineList events={timelineEvents} selectedId={selectedStageId} onSelect={handleStageClick} isReplay={isReplaying} />
                   </div>
                 </GlassCard>
-                <GlassCard>
-                  <GlassCardHeader>
-                    <GlassCardTitle>Stage Progress</GlassCardTitle>
-                  </GlassCardHeader>
-                  <StageMetrics timeline={timelineItems} progress={progressValue} />
-                </GlassCard>
+
+                <div className="flex flex-col gap-4">
+                  <div className="flex border-b border-glass-border">
+                    <button
+                      onClick={() => setActiveTab('activity')}
+                      className={cn(
+                        'flex items-center gap-2 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-[1px]',
+                        activeTab === 'activity'
+                          ? 'text-primary border-primary bg-primary/5'
+                          : 'text-muted-foreground border-transparent hover:text-foreground',
+                      )}
+                    >
+                      <Bot size={14} />
+                      Agent Activity
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('reasoning')}
+                      className={cn(
+                        'flex items-center gap-2 px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-[1px]',
+                        activeTab === 'reasoning'
+                          ? 'text-primary border-primary bg-primary/5'
+                          : 'text-muted-foreground border-transparent hover:text-foreground',
+                      )}
+                    >
+                      <BrainCircuit size={14} />
+                      AI Thoughts
+                      {reasoningEntries.length > 0 && (
+                        <span className="ml-1 px-1 py-0.5 rounded bg-primary/20 text-[10px] font-mono text-primary">
+                          {reasoningEntries.length}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+
+                  <GlassCard className="flex-1 p-4 overflow-y-auto max-h-[520px]">
+                    {activeTab === 'activity' ? (
+                      <AgentActivityPanel event={selectedStage} />
+                    ) : (
+                      <AIReasoningFeed entries={reasoningEntries} />
+                    )}
+                  </GlassCard>
+
+                  {!isReplaying && workflow && (
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="p-3 rounded-lg border border-glass-border bg-glass">
+                        <p className="text-[10px] text-muted-foreground">Match Score</p>
+                        <p className="text-sm font-bold font-mono text-primary">{formatPercent(workflow.match_score ?? null)}</p>
+                      </div>
+                      <div className="p-3 rounded-lg border border-glass-border bg-glass">
+                        <p className="text-[10px] text-muted-foreground">Confidence</p>
+                        <p className="text-sm font-bold font-mono text-success">{formatPercent(workflow.confidence_score ?? null)}</p>
+                      </div>
+                      <div className="p-3 rounded-lg border border-glass-border bg-glass">
+                        <p className="text-[10px] text-muted-foreground">Risk</p>
+                        <p className="text-sm font-bold font-mono text-warning">{formatRiskScore(workflow.risk_score ?? null)}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <GlassCard>
-                <GlassCardHeader>
-                  <GlassCardTitle>Workflow Timeline</GlassCardTitle>
-                  <Button variant="ghost" size="sm" onClick={() => refetch()}>
-                    <RefreshCw size={14} />
-                  </Button>
-                </GlassCardHeader>
-                <div className="mb-6">
-                  <AnimatedProgressSteps stages={workflow.stages || []} currentStage={workflow.current_stage || ''} />
-                </div>
-                <Separator className="my-4" />
-                <TimelineView timeline={timelineItems} />
-              </GlassCard>
+              <div className="relative h-1.5 rounded-full bg-surface-alt overflow-hidden">
+                <motion.div
+                  initial={{ width: 0 }}
+                  animate={{ width: `${progressPct}%` }}
+                  transition={{ duration: 0.8, ease: 'easeOut' }}
+                  className={cn(
+                    'absolute inset-y-0 left-0 rounded-full',
+                    progressPct === 100 ? 'bg-success' : 'bg-gradient-to-r from-primary to-secondary',
+                  )}
+                />
+              </div>
 
-              {workflow.top_matches && Array.isArray(workflow.top_matches) && workflow.top_matches.length > 0 && (
-                <GlassCard>
-                  <GlassCardHeader>
-                    <GlassCardTitle>Top Matches</GlassCardTitle>
-                  </GlassCardHeader>
-                  <div className="space-y-3 p-4">
-                    {workflow.top_matches.map((match, index) => {
+              {!isReplaying && workflow?.top_matches && Array.isArray(workflow.top_matches) && workflow.top_matches.length > 0 && (
+                <GlassCard className="p-4">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">Top Matches</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {workflow.top_matches.map((match, i) => {
                       const familyObj = (match as any).family ?? match
                       const familyName = typeof familyObj === 'object'
                         ? (familyObj as any).name ?? (familyObj as any).family_name ?? `Family ${(familyObj as any).family_id ?? ''}`
                         : String(familyObj)
                       const score = (match as any).blended_score ?? (match as any).match_score ?? 0
-                      const riskPct = (match as any).risk_probability ?? 0
-                      const explanation = (match as any).explanation ?? ''
-
                       return (
-                        <div key={index} className="rounded-xl border border-border p-3 bg-surface">
-                          <div className="flex items-center justify-between mb-1">
-                            <p className="text-sm font-medium text-foreground">
-                              <span className="text-muted-foreground mr-1">#{index + 1}</span>
-                              {familyName}
-                            </p>
-                            <span className="text-sm font-semibold text-primary">{formatPercent(score)}</span>
+                        <div key={i} className="p-3 rounded-lg border border-glass-border bg-glass">
+                          <p className="text-sm font-medium text-foreground">
+                            <span className="text-muted-foreground mr-1">#{i + 1}</span>
+                            {familyName}
+                          </p>
+                          <div className="mt-1.5 h-1.5 rounded-full bg-surface-alt overflow-hidden">
+                            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.min(score, 100)}%` }} />
                           </div>
-                          <div className="w-full bg-muted rounded-full h-1.5 mb-1">
-                            <div
-                              className="bg-primary h-1.5 rounded-full transition-all"
-                              style={{ width: `${Math.min(score, 100)}%` }}
-                            />
-                          </div>
-                          <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                            <span>Risk: {formatPercent(riskPct * 100)}</span>
-                            {explanation && <span className="truncate">{explanation}</span>}
-                          </div>
+                          <p className="text-xs text-muted-foreground mt-1 font-mono">{formatPercent(score)} match</p>
                         </div>
                       )
                     })}
                   </div>
                 </GlassCard>
               )}
-
-              {workflow.feature_importance && Array.isArray(workflow.feature_importance) && workflow.feature_importance.length > 0 && (
-                <GlassCard>
-                  <GlassCardHeader>
-                    <GlassCardTitle>Feature Importance</GlassCardTitle>
-                  </GlassCardHeader>
-                  <div className="space-y-3 p-4">
-                    {workflow.feature_importance.map((feature, index) => (
-                      <div key={index} className="rounded-xl border border-border p-3 bg-surface">
-                        <p className="text-sm font-medium text-foreground">
-                          {(feature as any).feature || (feature as any).name || JSON.stringify(feature)}
-                        </p>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Importance: {((feature as any).importance ?? (feature as any).score ?? 0).toString()}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </GlassCard>
-              )}
-
-              {workflow.metadata && Object.keys(workflow.metadata).length > 0 && (
-                <GlassCard>
-                  <GlassCardHeader>
-                    <GlassCardTitle>Metadata</GlassCardTitle>
-                  </GlassCardHeader>
-                  <pre className="text-xs text-muted-foreground font-mono whitespace-pre-wrap">
-                    {JSON.stringify(workflow.metadata, null, 2)}
-                  </pre>
-                </GlassCard>
-              )}
             </div>
           ) : (
-            <GlassCard>
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <AlertCircle size={32} className="text-warning mb-3" />
-                <p className="text-sm text-muted-foreground">No workflow data returned for "{workflowId}"</p>
+            <GlassCard className="p-8 text-center">
+              <div className="flex flex-col items-center">
+                <Search size={32} className="text-muted mb-3" />
+                <p className="text-sm text-muted-foreground">No workflow data found for &quot;{workflowId}&quot;</p>
                 <Button variant="secondary" size="sm" className="mt-4" onClick={() => refetch()}>
                   <RefreshCw size={14} />
                   Retry
@@ -481,19 +578,36 @@ export default function WorkflowTrackingPage() {
             </GlassCard>
           )}
         </DataLoader>
-      )}
-
-      {!workflowId && (
-        <GlassCard>
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <Search size={40} className="text-muted mb-4" />
-            <h2 className="text-lg font-semibold text-foreground mb-2">Search for a Workflow</h2>
-            <p className="text-sm text-muted-foreground max-w-md">
-              Enter a Workflow ID above to track its real-time status through the orchestration pipeline.
+      ) : (
+        <GlassCard className="p-12 text-center">
+          <div className="flex flex-col items-center max-w-md mx-auto">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/20 to-accent/20 border border-primary/30 flex items-center justify-center mb-5">
+              <ListChecks size={28} className="text-primary" />
+            </div>
+            <h2 className="text-lg font-semibold text-foreground mb-2">Workflow Timeline</h2>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Enter a Workflow ID above to visualize the complete AI orchestration pipeline.
+              Watch agents collaborate in real-time from referral intake to placement approval.
             </p>
+            <div className="flex items-center gap-6 mt-6 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1.5"><Bot size={12} />7 AI Agents</span>
+              <span className="flex items-center gap-1.5"><ListChecks size={12} />10 Stages</span>
+              <span className="flex items-center gap-1.5"><Clock size={12} />Live Updates</span>
+            </div>
+            <Button variant="outline" size="sm" className="mt-6" onClick={() => {
+              setSearchInput('foster-3001')
+              const normalized = normalizeWorkflowId('foster-3001')
+              setWorkflowId(normalized)
+              navigate(`/workflow/${normalized}`, { replace: true })
+            }}>
+              <Search size={14} />
+              Try Example: foster-3001
+            </Button>
           </div>
         </GlassCard>
       )}
+
+      <TimelineDetailDrawer event={drawerStage} onClose={() => setDrawerStageId(null)} />
     </motion.div>
   )
 }

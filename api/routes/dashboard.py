@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import structlog
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from api.db import get_pool
 
@@ -222,3 +222,84 @@ async def all_agent_statuses() -> dict[str, Any]:
             age = round(now - last_seen, 1)
         agents[name] = {"name": name, "status": status, "last_heartbeat_age_s": age}
     return {"agents": agents}
+
+
+@router.get("/api/agents")
+async def get_agents() -> dict[str, Any]:
+    """
+    Detailed agent registry info.
+    Returns every known agent with its current status, uptime estimate, and
+    a human-readable label.  Used by the front-end orchestration page.
+    """
+    now = time.time()
+    result: dict[str, Any] = {}
+    for name, last_seen in list(_agent_heartbeats.items()):
+        if last_seen is None:
+            status = "unknown"
+            age = None
+        elif now - last_seen < 90:
+            status = "active"
+            age = round(now - last_seen, 1)
+        else:
+            status = "idle"
+            age = round(now - last_seen, 1)
+        label = name.replace("_", " ").title()
+        result[name] = {
+            "id": name,
+            "name": label,
+            "type": name,
+            "status": status,
+            "last_heartbeat_age_s": age,
+        }
+    return {"agents": result}
+
+
+@router.get("/api/heartbeats")
+async def get_heartbeats() -> dict[str, Any]:
+    """Raw heartbeat timestamps for all registered agents."""
+    now = time.time()
+    heartbeats: dict[str, Any] = {}
+    for name, ts in list(_agent_heartbeats.items()):
+        heartbeats[name] = {
+            "last_seen_ts": ts,
+            "age_s": round(now - ts, 1) if ts else None,
+        }
+    return {"heartbeats": heartbeats}
+
+
+@router.get("/api/monitoring")
+async def get_monitoring() -> dict[str, Any]:
+    """
+    Combined monitoring payload: agent statuses + database metrics.
+    Single endpoint the monitoring page can call to get everything it needs.
+    """
+    now = time.time()
+    agents: dict[str, Any] = {}
+    for name, last_seen in list(_agent_heartbeats.items()):
+        if last_seen is None:
+            status = "unknown"
+        elif now - last_seen < 90:
+            status = "healthy"
+        else:
+            status = "stale"
+        agents[name] = {
+            "name": name,
+            "status": status,
+            "last_heartbeat_age_s": round(now - last_seen, 1) if last_seen else None,
+        }
+
+    pool = get_pool()
+    metrics = {"active_workflows": 0, "pending_approvals": 0, "healthy_agents": 0, "total_agents": len(agents)}
+    if pool:
+        async with pool.acquire() as conn:
+            metrics["active_workflows"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM placements WHERE status IN ('pending','pending_supervisor','approved')"
+            ) or 0
+            metrics["pending_approvals"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM placements WHERE status IN ('pending','pending_supervisor')"
+            ) or 0
+
+    healthy_count = sum(1 for a in agents.values() if a["status"] == "healthy")
+    metrics["healthy_agents"] = healthy_count
+
+    return {"agents": agents, "metrics": metrics}

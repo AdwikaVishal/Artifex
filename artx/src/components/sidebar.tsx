@@ -15,6 +15,7 @@ import {
   Shield,
   Users,
   BrainCircuit,
+  Network,
 } from 'lucide-react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
@@ -28,6 +29,7 @@ const navItems = [
   { icon: Building2, label: 'Families', path: '/families' },
   { icon: Users, label: 'Children', path: '/children' },
   { icon: BrainCircuit, label: 'Digital Twin', path: '/twin' },
+  { icon: Network, label: 'Orchestration', path: '/orchestration' },
   { icon: Shield, label: 'Fairness', path: '/fairness' },
   { icon: MessageSquare, label: 'AI Assistant', path: '/chat' },
   { icon: Activity, label: 'Monitoring', path: '/monitoring' },

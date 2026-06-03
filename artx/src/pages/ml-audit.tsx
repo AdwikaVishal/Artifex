@@ -48,11 +48,11 @@ async function apiFetch<T>(path: string, params?: Record<string, string>): Promi
 export default function MlAuditPage() {
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
   const [verifyLoading, setVerifyLoading] = useState(false)
-  const [verifyError, setVerifyError] = useState<string | null>(null)
+  const [verifyError, setVerifyError] = useState<Error | null>(null)
 
   const [decisions, setDecisions] = useState<Decision[]>([])
   const [decisionsLoading, setDecisionsLoading] = useState(false)
-  const [decisionsError, setDecisionsError] = useState<string | null>(null)
+  const [decisionsError, setDecisionsError] = useState<Error | null>(null)
   const [totalDecisions, setTotalDecisions] = useState(0)
 
   const [filterType, setFilterType] = useState('')
@@ -67,7 +67,7 @@ export default function MlAuditPage() {
       const result = await apiFetch<VerifyResult>(`${API}/verify`)
       setVerifyResult(result)
     } catch (e) {
-      setVerifyError((e as Error).message)
+      setVerifyError(e instanceof Error ? e : new Error('Unable to verify chain'))
     } finally {
       setVerifyLoading(false)
     }
@@ -88,7 +88,7 @@ export default function MlAuditPage() {
       setDecisions(result.decisions)
       setTotalDecisions(result.total)
     } catch (e) {
-      setDecisionsError((e as Error).message)
+      setDecisionsError(e instanceof Error ? e : new Error('Unable to load decisions'))
     } finally {
       setDecisionsLoading(false)
     }

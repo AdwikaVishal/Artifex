@@ -13,6 +13,7 @@ import {
   getRiskDistribution,
   getDashboardEvents,
   getAgentStatuses,
+  getAgents,
   getFamilies,
   createFamily,
   updateFamily,
@@ -54,6 +55,14 @@ export function useAgentStatuses() {
   return useQuery({
     queryKey: ['agents'],
     queryFn: getAgentStatuses,
+    refetchInterval: 8000,
+  })
+}
+
+export function useAgents() {
+  return useQuery({
+    queryKey: ['agents', 'detail'],
+    queryFn: getAgents,
     refetchInterval: 8000,
   })
 }

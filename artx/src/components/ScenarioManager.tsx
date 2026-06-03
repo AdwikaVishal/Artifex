@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Star, Edit, Trash2, FileText, Mail, ArrowLeft, Clock,
+  Star, Edit, Trash2, FileText, Mail, ArrowLeft, Clock, ExternalLink,
 } from 'lucide-react'
 import { GlassCard } from '@/components/ui/glass-card'
 import { Button } from '@/components/ui/button'
@@ -28,6 +28,7 @@ interface ScenarioManagerProps {
   onNewSimulation: () => void
   onGeneratePdf: () => void
   onGeneratePdfAndEmail: () => void
+  onReopenScenario: (slot: 'A' | 'B' | 'C') => void
 }
 
 function ScenarioCard({
@@ -35,11 +36,13 @@ function ScenarioCard({
   slot,
   onSaveNote,
   onDelete,
+  onReopen,
 }: {
   scenario: Scenario | null
   slot: 'A' | 'B' | 'C'
   onSaveNote: (slot: 'A' | 'B' | 'C', note: string) => void
   onDelete: (slot: 'A' | 'B' | 'C') => void
+  onReopen: (slot: 'A' | 'B' | 'C') => void
 }) {
   const [note, setNote] = useState(scenario?.caseworker_note || '')
   const [saving, setSaving] = useState(false)
@@ -78,36 +81,26 @@ function ScenarioCard({
             Scenario {slot} — "{scenario.label}"
           </span>
         </div>
-        <button
-          onClick={() => onDelete(slot)}
-          className="text-muted-foreground hover:text-destructive transition-colors cursor-pointer"
-          aria-label="Delete scenario"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button onClick={() => onReopen(slot)} className="text-muted-foreground hover:text-primary transition-colors cursor-pointer p-1" title="Reopen results">
+            <ExternalLink className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={() => onDelete(slot)} className="text-muted-foreground hover:text-destructive transition-colors cursor-pointer p-1" aria-label="Delete scenario">
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       <div className="space-y-2 mb-4">
         {scenario.interventions.map((iv) => {
           const borderColor: Record<string, string> = {
-            school: 'border-l-orange-500',
-            placement: 'border-l-purple-500',
-            therapy: 'border-l-emerald-500',
-            visits: 'border-l-blue-500',
-            mentor: 'border-l-yellow-500',
-            caseworker: 'border-l-gray-400',
-            sibling: 'border-l-pink-400',
-            medication: 'border-l-red-500',
+            school: 'border-l-orange-500', placement: 'border-l-purple-500', therapy: 'border-l-emerald-500',
+            visits: 'border-l-blue-500', mentor: 'border-l-yellow-500', caseworker: 'border-l-gray-400',
+            sibling: 'border-l-pink-400', medication: 'border-l-red-500',
           }
           const displayLabel = iv.label || iv.domain.charAt(0).toUpperCase() + iv.domain.slice(1)
           return (
-            <div
-              key={iv.domain}
-              className={cn(
-                'text-xs px-2.5 py-1.5 rounded bg-glass border border-border-light border-l-4',
-                borderColor[iv.domain] || 'border-l-primary',
-              )}
-            >
+            <div key={iv.domain} className={cn('text-xs px-2.5 py-1.5 rounded bg-glass border border-border-light border-l-4', borderColor[iv.domain] || 'border-l-primary')}>
               {displayLabel}: {iv.value || 'selected'}
             </div>
           )
@@ -135,14 +128,7 @@ function ScenarioCard({
           value={note}
           onChange={(e) => setNote(e.target.value)}
         />
-        <Button
-          variant="secondary"
-          size="sm"
-          className="w-full"
-          onClick={handleSaveNote}
-          loading={saving}
-          disabled={note === scenario.caseworker_note}
-        >
+        <Button variant="secondary" size="sm" className="w-full" onClick={handleSaveNote} loading={saving} disabled={note === scenario.caseworker_note}>
           Save note
         </Button>
       </div>
@@ -159,64 +145,50 @@ export function ScenarioManager({
   onNewSimulation,
   onGeneratePdf,
   onGeneratePdfAndEmail,
+  onReopenScenario,
 }: ScenarioManagerProps) {
   const filledCount = scenarios.filter(Boolean).length
+
+  const handleConsultSupervisor = () => {
+    window.open(`mailto:supervisor@artifex.local?subject=Case Conference Prep — ${childId}&body=I have prepared simulation scenarios and am requesting a case conference.`, '_blank')
+  }
+
+  const slots: ('A' | 'B' | 'C')[] = ['A', 'B', 'C']
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-        >
+        <button onClick={onBack} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
           <ArrowLeft className="w-4 h-4" />
           Back to simulation
         </button>
-        <Button variant="secondary" size="sm" onClick={onConsultSupervisor}>
+        <Button variant="secondary" size="sm" onClick={handleConsultSupervisor}>
           Consult supervisor
         </Button>
       </div>
 
       <div>
-        <h2 className="text-lg font-semibold text-foreground mb-1">
-          Saved scenarios for {childId}
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          {filledCount} of 3 scenarios saved. Scenarios expire after 7 days.
-        </p>
+        <h2 className="text-lg font-semibold text-foreground mb-1">Saved scenarios for {childId}</h2>
+        <p className="text-sm text-muted-foreground">{filledCount} of 3 scenarios saved. Scenarios expire after 7 days.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {(['A', 'B', 'C'] as const).map((slot) => {
-          const sc = scenarios.find((s) => s?.slot === slot) || null
+        {slots.map((slot) => {
+          const sc = scenarios[slots.indexOf(slot)] || null
           return (
-            <ScenarioCard
-              key={slot}
-              scenario={sc as Scenario | null}
-              slot={slot}
-              onSaveNote={onSaveNote}
-              onDelete={onDelete}
-            />
+            <ScenarioCard key={slot} scenario={sc as Scenario | null} slot={slot} onSaveNote={onSaveNote} onDelete={onDelete} onReopen={onReopenScenario} />
           )
         })}
       </div>
 
       <AnimatePresence>
         {filledCount > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="space-y-4"
-          >
+          <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
             <GlassCard>
-              <h3 className="text-sm font-semibold text-foreground mb-2">
-                Prepare for case conference
-              </h3>
+              <h3 className="text-sm font-semibold text-foreground mb-2">Prepare for case conference</h3>
               <p className="text-sm text-muted-foreground mb-4">
-                Generate a PDF summary of all saved scenarios to share with your supervisor
-                and the case conference team.
+                Generate a PDF summary of all saved scenarios to share with your supervisor and the case conference team.
               </p>
-
               <div className="text-xs text-muted-foreground mb-4 space-y-1">
                 <p>The PDF will include:</p>
                 <ul className="list-disc list-inside space-y-0.5">
@@ -224,19 +196,12 @@ export function ScenarioManager({
                   <li>Each saved scenario with its outcomes</li>
                   <li>Side-by-side trajectory charts</li>
                   <li>Your caseworker notes</li>
-                  <li>Data source disclosure: "Based on {1842} historical placements"</li>
+                  <li>Data source disclosure: "Based on historical placements"</li>
                 </ul>
               </div>
-
               <div className="flex gap-3">
-                <Button onClick={onGeneratePdf}>
-                  <FileText className="w-4 h-4" />
-                  Generate PDF
-                </Button>
-                <Button variant="secondary" onClick={onGeneratePdfAndEmail}>
-                  <Mail className="w-4 h-4" />
-                  Generate PDF + Email
-                </Button>
+                <Button onClick={onGeneratePdf}><FileText className="w-4 h-4" />Generate PDF</Button>
+                <Button variant="secondary" onClick={onGeneratePdfAndEmail}><Mail className="w-4 h-4" />Generate PDF + Email</Button>
               </div>
             </GlassCard>
           </motion.div>
@@ -244,10 +209,7 @@ export function ScenarioManager({
       </AnimatePresence>
 
       <div className="text-center">
-        <button
-          onClick={onNewSimulation}
-          className="text-sm text-primary hover:underline cursor-pointer"
-        >
+        <button onClick={onNewSimulation} className="text-sm text-primary hover:underline cursor-pointer">
           ← Run a new simulation
         </button>
       </div>
@@ -259,11 +221,3 @@ export function ScenarioManager({
     </div>
   )
 }
-
-function onConsultSupervisor() {
-  // Placeholder: opens a draft email or case conference agenda
-  window.open(`mailto:supervisor@artifex.local?subject=Case Conference Prep&body=I have prepared simulation scenarios and am requesting a case conference.`, '_blank')
-}
-
-/* Export the helper so TwinPage can use it */
-export { onConsultSupervisor }

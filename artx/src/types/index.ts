@@ -53,6 +53,13 @@ export interface TopMatch {
   explanation: string
 }
 
+export interface WorkflowActivityEntry {
+  timestamp: string
+  message: string
+  stage?: string
+  status?: string
+}
+
 export interface WorkflowStatus {
   workflow_id: string
   status: string
@@ -71,6 +78,7 @@ export interface WorkflowStatus {
   top_matches?: TopMatch[] | null
   capacity?: number | null
   metadata?: Record<string, unknown>
+  activity_feed?: WorkflowActivityEntry[]
   created_at?: string | null
   updated_at?: string | null
 }
