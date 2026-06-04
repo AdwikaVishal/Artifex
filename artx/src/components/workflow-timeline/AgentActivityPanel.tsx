@@ -87,7 +87,9 @@ export default function AgentActivityPanel({ event }: AgentActivityPanelProps) {
               } />
               <div>
                 <p className="text-[10px] text-muted-foreground">Confidence</p>
-                <p className="text-xs font-mono text-foreground">{event.confidenceScore}%</p>
+                <p className="text-xs font-mono text-foreground">
+                  {event.confidenceScore != null ? `${event.confidenceScore}%` : '—'}
+                </p>
               </div>
             </div>
           </div>

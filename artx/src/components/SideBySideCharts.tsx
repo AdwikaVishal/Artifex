@@ -136,20 +136,21 @@ function TrajectoryChart({ data, label, isCounterfactual, nHistorical }: {
   )
 }
 
-function StabilityGauge({ value, label }: { value: number; label: string }) {
-  const color = value >= 60 ? 'text-success' : value >= 40 ? 'text-warning' : 'text-destructive'
-  const rotation = -90 + (value / 100) * 180
+function StabilityGauge({ value, label }: { value: number | null | undefined; label: string }) {
+  const num = typeof value === 'number' && !Number.isNaN(value) ? value : 0
+  const rotation = (num / 100) * 180
+  const color = num >= 60 ? 'text-success' : num >= 40 ? 'text-warning' : 'text-destructive'
   return (
     <div className="flex flex-col items-center gap-1">
-      <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</span>
-      <svg width="64" height="40" viewBox="0 0 64 40" className="shrink-0">
-        <path d="M6 36 A28 28 0 0 1 58 36" fill="none" stroke="hsl(var(--border))" strokeWidth="4" strokeLinecap="round" />
-        <path d="M6 36 A28 28 0 0 1 58 36" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round"
-          strokeDasharray={`${(value / 100) * 80} 80`} className={color} />
-        <line x1="32" y1="36" x2="32" y2="36" stroke="currentColor" strokeWidth="2"
+      <svg width="64" height="56" viewBox="0 0 64 56" className="shrink-0">
+        <path d="M4 50 A28 28 0 0 1 60 50 Z" fill="none" stroke="currentColor" strokeWidth="4" className="text-border-light" />
+        <line x1="32" y1="36" x2="32" y2="14" stroke="currentColor" strokeWidth="3"
           transform={`rotate(${rotation - 90} 32 36)`} className={color} />
-        <text x="32" y="18" textAnchor="middle" className="fill-foreground text-[10px] font-bold">{Math.round(value)}%</text>
+        <text x="32" y="18" textAnchor="middle" className="fill-foreground text-[10px] font-bold">
+          {num > 0 ? `${Math.round(num)}%` : '—'}
+        </text>
       </svg>
+      <span className="text-[10px] text-muted-foreground text-center leading-tight">{label}</span>
     </div>
   )
 }
@@ -202,7 +203,7 @@ function AiReasoningPanel({ effect }: { effect: EffectData }) {
       <button onClick={() => setExpanded(!expanded)} className="w-full flex items-center justify-between cursor-pointer">
         <div className="flex items-center gap-2">
           <BrainCircuit className="w-4 h-4 text-primary" />
-          <h3 className="text-sm font-semibold text-foreground">AI Reasoning</h3>
+          <h3 className="text-sm font-semibold text-foreground">Simulation Analysis</h3>
         </div>
         <span className="text-xs text-muted-foreground">{expanded ? 'Hide' : 'Show details'}</span>
       </button>
@@ -457,11 +458,11 @@ export function SideBySideCharts({
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <StabilityGauge value={stabilityScore} label="Current Stability" />
         <StabilityGauge value={Math.round(cfStable * 100)} label="Predicted Stability" />
-        <StabilityGauge value={Math.round((1 - effect.uncertainty_score) * 100)} label="Confidence" />
+        <StabilityGauge value={Math.round((1 - baseline.uncertainty_score) * 100)} label="Confidence" />
         <StabilityGauge value={currentDrift} label="Drift Score" />
       </div>
 
-      {/* ── AI Reasoning ── */}
+      {/* ── Simulation Analysis ── */}
       <AiReasoningPanel effect={effect} />
 
       {/* ── What this means ── */}
@@ -475,7 +476,7 @@ export function SideBySideCharts({
         </div>
         <VerdictBadge probabilityOfBenefit={effect.probability_of_benefit} />
         <div className="mt-4 space-y-2">
-          <p className="text-sm text-muted-foreground">Out of 1,000 simulated scenarios:</p>
+          <p className="text-sm text-muted-foreground">Estimated outcome distribution:</p>
           <ul className="space-y-1 text-sm">
             <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-success" /><span>{nImproved} showed improvement with these changes</span></li>
             <li className="flex items-center gap-2"><span className="w-3.5 h-3.5 flex items-center justify-center text-muted-foreground">—</span><span>{1000 - nImproved} showed no meaningful difference</span></li>

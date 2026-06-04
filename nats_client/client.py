@@ -29,17 +29,19 @@ class NATSManager:
     """Thread-safe singleton NATS connection manager."""
 
     _instance: NATSManager | None = None
+    _nats_url_cache: str = "nats://localhost:4222"
 
     def __new__(cls, nats_url: str = "nats://localhost:4222") -> NATSManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialised = False
+            cls._nats_url_cache = nats_url
         return cls._instance
 
     def __init__(self, nats_url: str = "nats://localhost:4222") -> None:
         if self._initialised:
             return
-        self.nats_url = nats_url
+        self.nats_url: str = NATSManager._nats_url_cache
         self.nc: NATSClient | None = None
         self._subscriptions: list[Any] = []
         self._initialised = True
@@ -47,7 +49,13 @@ class NATSManager:
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Establish connection with exponential-backoff reconnect."""
+        """Establish connection with exponential-backoff reconnect.
+
+        Idempotent: safe to call multiple times; returns existing connection if already connected.
+        """
+        if self.nc is not None and not self.nc.is_closed:
+            logger.debug("NATS already connected", extra={"url": self.nats_url})
+            return
         self.nc = await nats.connect(
             self.nats_url,
             reconnect_time_wait=2,
@@ -126,6 +134,18 @@ class NATSManager:
 
     async def _reconnected_cb(self) -> None:
         logger.info("NATS reconnected", extra={"url": self.nc.connected_url.netloc if self.nc else "?"})
+        # Re-apply stored subscriptions on reconnect
+        for sub in list(self._subscriptions):
+            try:
+                subject = getattr(sub, "subject", None)
+                queue = getattr(sub, "queue", "")
+                cb = getattr(sub, "_cb", None)
+                if subject and cb:
+                    new_sub = await self.nc.subscribe(subject, queue=queue, cb=cb)
+                    idx = self._subscriptions.index(sub)
+                    self._subscriptions[idx] = new_sub
+            except Exception as exc:
+                logger.warning("NATS re-subscribe error", extra={"error": str(exc)})
 
     async def _closed_cb(self) -> None:
         logger.info("NATS connection closed")

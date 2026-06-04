@@ -4,13 +4,40 @@
  * Shows disparity rates for gender, special needs, and emergency level,
  * with per-group breakdowns and a pass/review status badge.
  */
-import { Shield, CheckCircle, AlertCircle, BarChart3, RefreshCw } from 'lucide-react'
+import { Shield, CheckCircle, AlertCircle, AlertTriangle, BarChart3, RefreshCw } from 'lucide-react'
 import { useFairnessMetrics } from '@/hooks/use-foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { DataLoader } from '@/components/data-loader'
 import { cn } from '@/lib/utils'
 import { useQueryClient } from '@tanstack/react-query'
 import type { FairnessGroupBreakdown } from '@/services/foster'
+
+const MIN_RELIABLE_SAMPLE = 30
+
+function confidenceLevel(n: number): 'none' | 'low' | 'medium' | 'high' {
+  if (n < 5) return 'none'
+  if (n < 30) return 'low'
+  if (n < 100) return 'medium'
+  return 'high'
+}
+
+function getDiversityWarning(key: string, groups: FairnessGroupBreakdown[]): string | null {
+  if (groups.length >= 2) return null
+  if (groups.length === 0) return 'No data available'
+  const groupName = groups[0].group
+  if (key === 'special_needs') {
+    return groupName === 'false' || groupName === 'False'
+      ? 'No placements in special-needs group'
+      : 'No placements without special needs'
+  }
+  if (key === 'emergency_level') {
+    return 'Only one emergency level category present'
+  }
+  if (key === 'gender') {
+    return `Only one gender group: ${groupName}`
+  }
+  return 'Not enough group diversity'
+}
 
 function BiasBar({
   label,
@@ -98,6 +125,12 @@ function GroupBreakdownTable({ rows }: { rows: FairnessGroupBreakdown[] }) {
   )
 }
 
+const breakdownKeys: { key: string; label: string }[] = [
+  { key: 'gender', label: 'Gender' },
+  { key: 'special_needs', label: 'Special Needs' },
+  { key: 'emergency_level', label: 'Emergency Level' },
+]
+
 export function FairnessDashboard() {
   const { data: metrics, isLoading, error } = useFairnessMetrics()
   const queryClient = useQueryClient()
@@ -105,6 +138,10 @@ export function FairnessDashboard() {
   const handleRefresh = () => {
     queryClient.invalidateQueries({ queryKey: ['fairness', 'metrics'] })
   }
+
+  const conf = metrics ? confidenceLevel(metrics.total_placements) : 'high'
+  const displayMode: 'insufficient' | 'preliminary' | 'scored' =
+    conf === 'none' ? 'insufficient' : conf === 'low' ? 'preliminary' : 'scored'
 
   return (
     <GlassCard>
@@ -118,17 +155,27 @@ export function FairnessDashboard() {
             <div
               className={cn(
                 'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium',
-                metrics.status === 'PASS'
-                  ? 'bg-green-500/15 text-green-400'
-                  : 'bg-yellow-500/15 text-yellow-400'
+                displayMode === 'insufficient'
+                  ? 'bg-gray-500/15 text-gray-400'
+                  : displayMode === 'preliminary'
+                    ? 'bg-yellow-500/15 text-yellow-400'
+                    : metrics.status === 'PASS'
+                      ? 'bg-green-500/15 text-green-400'
+                      : 'bg-yellow-500/15 text-yellow-400'
               )}
             >
-              {metrics.status === 'PASS' ? (
+              {displayMode === 'insufficient' ? (
+                <AlertTriangle className="w-3.5 h-3.5" />
+              ) : displayMode === 'preliminary' ? (
+                <AlertTriangle className="w-3.5 h-3.5" />
+              ) : metrics.status === 'PASS' ? (
                 <CheckCircle className="w-3.5 h-3.5" />
               ) : (
                 <AlertCircle className="w-3.5 h-3.5" />
               )}
-              {metrics.status === 'PASS' ? 'Within Threshold' : 'Review Recommended'}
+              {displayMode === 'insufficient' ? 'Insufficient Data' :
+               displayMode === 'preliminary' ? 'Preliminary' :
+               metrics.status === 'PASS' ? 'Within Threshold' : 'Review Recommended'}
             </div>
           )}
           <button
@@ -145,41 +192,83 @@ export function FairnessDashboard() {
         <DataLoader isLoading={isLoading} error={error} type="card" rows={3}>
           {metrics && (
             <div className="space-y-6">
+              {/* Sample size warning */}
+              {displayMode !== 'scored' && (
+                <div className={cn(
+                  'flex items-start gap-2 p-3 rounded-lg border',
+                  displayMode === 'insufficient'
+                    ? 'bg-red-500/5 border-red-500/20'
+                    : 'bg-yellow-500/5 border-yellow-500/20',
+                )}>
+                  <AlertTriangle className={cn(
+                    'w-4 h-4 mt-0.5 shrink-0',
+                    displayMode === 'insufficient' ? 'text-red-400' : 'text-yellow-400',
+                  )} />
+                  <div>
+                    <p className="text-xs font-medium text-gray-200">
+                      {displayMode === 'insufficient' ? 'Insufficient data' : 'Preliminary results'}
+                    </p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {displayMode === 'insufficient'
+                        ? `Only ${metrics.total_placements} placements audited. Need at least ${MIN_RELIABLE_SAMPLE} for meaningful analysis.`
+                        : `${metrics.total_placements} placements audited. Results may change significantly as sample grows.`
+                      }
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Bias bars */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <BiasBar
-                  label="Gender Disparity"
-                  value={metrics.gender_bias}
-                  threshold={metrics.threshold}
-                />
-                <BiasBar
-                  label="Special Needs Disparity"
-                  value={metrics.special_needs_bias}
-                  threshold={metrics.threshold}
-                />
-                <BiasBar
-                  label="Emergency Level Disparity"
-                  value={metrics.emergency_level_bias}
-                  threshold={metrics.threshold}
-                />
+                {breakdownKeys.map((bk) => {
+                  const groups = metrics.breakdowns[bk.key as keyof typeof metrics.breakdowns] ?? []
+                  const warning = getDiversityWarning(bk.key, groups)
+                  const computable = warning === null
+                  const biasValue = bk.key === 'gender' ? metrics.gender_bias
+                    : bk.key === 'special_needs' ? metrics.special_needs_bias
+                    : metrics.emergency_level_bias
+                  if (!computable) {
+                    return (
+                      <div key={bk.key} className="bg-gray-800/60 rounded-lg p-4">
+                        <p className="text-sm text-gray-500 mb-2">{bk.key === 'special_needs' ? 'Special Needs Parity' : bk.label + ' Parity'}</p>
+                        <p className="text-xs text-gray-500">Cannot evaluate</p>
+                        <p className="text-[10px] text-gray-600 mt-0.5">{warning}</p>
+                      </div>
+                    )
+                  }
+                  return (
+                    <BiasBar
+                      key={bk.key}
+                      label={bk.key === 'special_needs' ? 'Special Needs Parity' : bk.label + ' Parity'}
+                      value={biasValue}
+                      threshold={metrics.threshold}
+                    />
+                  )
+                })}
               </div>
 
               {/* Breakdowns */}
               <div className="space-y-4">
-                <div>
-                  <p className="text-xs text-gray-400 mb-2 flex items-center gap-1.5">
-                    <BarChart3 className="w-3.5 h-3.5" />
-                    Gender breakdown
-                  </p>
-                  <GroupBreakdownTable rows={metrics.breakdowns.gender} />
-                </div>
-                <div>
-                  <p className="text-xs text-gray-400 mb-2 flex items-center gap-1.5">
-                    <BarChart3 className="w-3.5 h-3.5" />
-                    Special needs breakdown
-                  </p>
-                  <GroupBreakdownTable rows={metrics.breakdowns.special_needs} />
-                </div>
+                {breakdownKeys.map((bk) => {
+                  const groups = metrics.breakdowns[bk.key as keyof typeof metrics.breakdowns] ?? []
+                  const warning = getDiversityWarning(bk.key, groups)
+                  const computable = warning === null
+                  return (
+                    <div key={bk.key}>
+                      <p className="text-xs text-gray-400 mb-2 flex items-center gap-1.5">
+                        <BarChart3 className="w-3.5 h-3.5" />
+                        {bk.label} breakdown
+                      </p>
+                      {computable ? (
+                        <GroupBreakdownTable rows={groups} />
+                      ) : (
+                        <div className="text-xs text-gray-500 italic py-2">
+                          {warning}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
 
               {/* Footer */}

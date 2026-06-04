@@ -8,9 +8,9 @@ import { StatusBadge } from '@/components/ui/badge'
 import { DataLoader } from '@/components/data-loader'
 import { formatDate } from '@/lib/utils'
 import { normalizeWorkflowId, subscribeWorkflowStream } from '@/services/foster'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
-  Search, ArrowLeft, RefreshCw, Bot, MessageSquare, BrainCircuit,
+  Search, ArrowLeft, RefreshCw, Bot, BrainCircuit,
   Clock, Timer, ListChecks,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -58,32 +58,42 @@ function apiEventsToTimeline(events: WorkflowStage[]): TimelineEvent[] {
     if (!isNewStyleStage(stageName)) continue
     const status = STATUS_MAP[e.status] || 'pending'
 
-    // Extract agent metadata from the data.payload field if present
-    const payload = typeof e.data === 'object' && e.data !== null ? e.data : {}
-    const agentName = (payload as any).agent || ''
-    const agentAction = (payload as any).action || ''
-    const agentOutput = (payload as any).output || ''
-    const latency = typeof (payload as any).latency === 'number' ? (payload as any).latency : 0
-    const confidenceScoreVal = (payload as any).confidence_score
-      ?? ((payload as any).confidence != null
-        ? (payload as any).confidence <= 1
-          ? Math.round((payload as any).confidence * 100)
-          : Math.round((payload as any).confidence)
-        : 0)
-    const reasoning = Array.isArray((payload as any).reasoning) ? (payload as any).reasoning : []
-    const inputData = (payload as any).inputData || (payload as any).input || ''
-    const outputData = (payload as any).outputData || ''
-    const decisionExplanation = (payload as any).decisionExplanation || ''
-    const logs = Array.isArray((payload as any).logs) ? (payload as any).logs : []
-    const detailsStr = e.details || (
-      typeof e.data === 'object' && e.data !== null
-        ? ((e.data as any).message || (e.data as any).details || '')
-        : typeof e.data === 'string' ? e.data : undefined
-    )
+    // Parse e.data (which may be a raw JSON string instead of object)
+    let parsedData: Record<string, unknown> = {}
+    if (typeof e.data === 'object' && e.data !== null) {
+      parsedData = e.data as Record<string, unknown>
+    } else if (typeof e.data === 'string' && e.data.trim().startsWith('{')) {
+      try { parsedData = JSON.parse(e.data) } catch { parsedData = {} }
+    }
+    // Parse e.details (may also be a JSON string or nested message)
+    let detailsStr = ''
+    if (typeof e.details === 'string' && e.details.trim().startsWith('{')) {
+      try {
+        const detailsParsed = JSON.parse(e.details) as Record<string, unknown>
+        parsedData = { ...parsedData, ...detailsParsed }
+      } catch { detailsStr = e.details }
+    } else { detailsStr = e.details || '' }
+
+    const agentName = parsedData.agent as string || ''
+    const agentAction = parsedData.action as string || ''
+    const agentOutput = parsedData.output as string || ''
+    const latency = typeof parsedData.latency === 'number' ? parsedData.latency : 0
+    const confidenceScoreVal = parsedData.confidence_score
+      ?? (parsedData.confidence != null
+        ? parsedData.confidence <= 1
+          ? Math.round(parsedData.confidence * 100)
+          : Math.round(parsedData.confidence)
+        : 0) as number
+    const reasoning = Array.isArray(parsedData.reasoning) ? parsedData.reasoning : []
+    const inputData = (parsedData.inputData as string) || (parsedData.input as string) || ''
+    const outputData = (parsedData.outputData as string) || ''
+    const decisionExplanation = (parsedData.decisionExplanation as string) || ''
+    const logs = Array.isArray(parsedData.logs) ? parsedData.logs : []
+    if (!detailsStr) {
+      detailsStr = (parsedData.message as string) || (parsedData.details as string) || ''
+    }
     const stagePayload: Record<string, unknown> | undefined =
-      typeof e.data === 'object' && e.data !== null && Object.keys(e.data).length > 0
-        ? (e.data as Record<string, unknown>)
-        : undefined
+      Object.keys(parsedData).length > 0 ? parsedData : undefined
 
     const existing = seen.get(stageName)
     const rank = STATUS_RANK[status] ?? 0
@@ -279,30 +289,41 @@ export default function WorkflowTrackingPage() {
           const raw = (msg.stage || '').replace(/_/g, ' ')
           const label = raw.charAt(0).toUpperCase() + raw.slice(1)
 
+          // Try to parse any string fields in msg.payload that look like JSON
+          const safePayload = msg.payload as Record<string, unknown> | undefined
+          const parsedPayload: Record<string, unknown> = safePayload ? { ...safePayload } : {}
+          if (safePayload) {
+            for (const [k, v] of Object.entries(safePayload)) {
+              if (typeof v === 'string' && v.trim().startsWith('{')) {
+                try { parsedPayload[k] = JSON.parse(v) } catch { /* keep original */ }
+              }
+            }
+          }
+
           const newEvent: TimelineEvent = {
             id: `live-${stageName}-${status}-${Date.now()}`,
             stage: stageName,
             label,
             status,
-            agentName: msg.payload?.agent || '',
-            agentAction: msg.payload?.action || '',
-            agentOutput: msg.payload?.output || '',
-            latency: typeof msg.payload?.latency === 'number' ? msg.payload.latency : 0,
-            confidenceScore: typeof msg.payload?.confidence === 'number'
-              ? Math.round(msg.payload.confidence * 100)
-              : typeof msg.payload?.confidence_score === 'number'
-                ? Math.round(msg.payload.confidence_score)
+            agentName: (parsedPayload.agent as string) || '',
+            agentAction: (parsedPayload.action as string) || '',
+            agentOutput: (parsedPayload.output as string) || '',
+            latency: typeof parsedPayload.latency === 'number' ? parsedPayload.latency : 0,
+            confidenceScore: typeof parsedPayload.confidence === 'number'
+              ? Math.round(parsedPayload.confidence * 100)
+              : typeof parsedPayload.confidence_score === 'number'
+                ? Math.round(parsedPayload.confidence_score)
                 : 0,
-            reasoning: msg.payload?.reasoning || [],
-            inputData: msg.payload?.inputData || msg.payload?.input || '',
-            outputData: msg.payload?.outputData || '',
-            decisionExplanation: msg.payload?.decisionExplanation || '',
-            logs: msg.payload?.logs || [],
+            reasoning: Array.isArray(parsedPayload.reasoning) ? parsedPayload.reasoning : [],
+            inputData: (parsedPayload.inputData as string) || (parsedPayload.input as string) || '',
+            outputData: (parsedPayload.outputData as string) || '',
+            decisionExplanation: (parsedPayload.decisionExplanation as string) || '',
+            logs: Array.isArray(parsedPayload.logs) ? parsedPayload.logs : [],
             timestamp: msg.timestamp,
             startedAt: msg.timestamp,
             completedAt: status === 'completed' ? msg.timestamp : undefined,
-            details: msg.payload?.message || msg.payload?.details || undefined,
-            payload: msg.payload || undefined,
+            details: (parsedPayload.message as string) || (parsedPayload.details as string) || undefined,
+            payload: Object.keys(parsedPayload).length > 0 ? parsedPayload : undefined,
           }
 
           setLiveEvents((prev) => {

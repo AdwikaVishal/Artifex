@@ -473,6 +473,52 @@ export async function getShapExplanation(workflowId: string): Promise<ShapExplan
   return res.data
 }
 
+// ── Child Event WebSocket streaming ───────────────────────────────────────
+export function subscribeChildEventStream(
+  childId: string,
+  onMessage: (event: TimelineEventV2) => void,
+  onOpen?: () => void,
+  onClose?: () => void,
+): { close: () => void } {
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const host = window.location.host
+  const token = localStorage.getItem('artifex_token') || ''
+  const url = `${protocol}://${host}/ws/child/${encodeURIComponent(childId)}?token=${encodeURIComponent(token)}`
+
+  let ws: WebSocket | null = null
+  let shouldClose = false
+  let attempt = 0
+  const MAX_DELAY_MS = 30_000
+
+  function backoffDelay(): number {
+    return Math.random() * Math.min(500 * 2 ** attempt, MAX_DELAY_MS)
+  }
+
+  function connect() {
+    ws = new WebSocket(url)
+    ws.onopen = () => { attempt = 0; onOpen?.() }
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data)
+        if (data.type === 'pong') return
+        onMessage(data as TimelineEventV2)
+      } catch { /* ignore parse errors */ }
+    }
+    ws.onclose = (ev) => {
+      if (shouldClose) { onClose?.(); return }
+      if (ev.code === 1008) { onClose?.(); return }
+      const delay = backoffDelay()
+      attempt++
+      setTimeout(() => connect(), delay)
+    }
+    ws.onerror = () => {}
+  }
+  connect()
+  return {
+    close: () => { shouldClose = true; try { ws?.close() } catch {} },
+  }
+}
+
 // ── Child Timeline (v2 – child_life_events) ────────────────────────────────
 
 export type TimelineEventType =
@@ -482,8 +528,12 @@ export type TimelineEventType =
   | 'family_visitation' | 'milestone' | 'crisis_alert' | 'drift_threshold'
   | 'prediction_feedback' | 'twin_simulation' | 'caseworker_assignment'
   | 'caseworker_change' | 'manual_entry'
+  // Live-feed simplified types
+  | 'school' | 'medical' | 'incident' | 'visit' | 'legal' | 'placement' | 'note'
 
 export type TimelineEventSealLevel = 'none' | 'partial' | 'full'
+
+export type EventSeverity = 'low' | 'medium' | 'high' | 'critical'
 
 export interface TimelineEventV2 {
   id: number
@@ -491,6 +541,10 @@ export interface TimelineEventV2 {
   event_type: TimelineEventType
   event_date: string
   event_time?: string | null
+  title?: string | null
+  description?: string | null
+  severity?: EventSeverity | null
+  created_by?: string | null
   recorded_at: string
   source_table?: string | null
   source_id?: number | null
@@ -516,6 +570,10 @@ export interface CreateEventRequest {
   event_type: TimelineEventType
   event_date: string
   event_time?: string | null
+  title?: string | null
+  description?: string | null
+  severity?: EventSeverity | null
+  created_by?: string | null
   payload?: Record<string, unknown>
   seal_level?: TimelineEventSealLevel
   source_table?: string | null
@@ -524,8 +582,33 @@ export interface CreateEventRequest {
 
 export interface CreateEventResponse {
   status: string
-  event_id: number
+  event: TimelineEventV2
   message: string
+}
+
+export interface QuickAddRequest {
+  event_type: 'school' | 'medical' | 'incident' | 'visit' | 'legal' | 'placement' | 'note'
+  title?: string | null
+  description?: string | null
+  severity?: EventSeverity | null
+}
+
+export interface ChildEventStats {
+  child_id: string
+  child_name: string
+  age: number | null
+  emergency_level: string
+  special_needs: boolean
+  location: string
+  total_events: number
+  by_type: Record<string, number>
+  by_severity: Record<string, number>
+  last_activity: string | null
+  placement: {
+    family_id?: string
+    status?: string
+    since?: string
+  }
 }
 
 export interface VerifyEventResponse {
@@ -578,6 +661,24 @@ export async function createTimelineEvent(
   const res = await api.post<CreateEventResponse>(
     `/api/timeline/${encodeURIComponent(childId)}/events`,
     data,
+  )
+  return res.data
+}
+
+export async function quickAddEvent(
+  childId: string,
+  data: QuickAddRequest,
+): Promise<CreateEventResponse> {
+  const res = await api.post<CreateEventResponse>(
+    `/api/timeline/${encodeURIComponent(childId)}/events/quick`,
+    data,
+  )
+  return res.data
+}
+
+export async function getChildEventStats(childId: string): Promise<ChildEventStats> {
+  const res = await api.get<ChildEventStats>(
+    `/api/timeline/${encodeURIComponent(childId)}/stats`,
   )
   return res.data
 }
@@ -841,5 +942,62 @@ export interface MonitoringSummary {
 
 export async function getMonitoringSummary(): Promise<MonitoringSummary> {
   const res = await api.get<MonitoringSummary>('/api/monitoring/summary')
+  return res.data
+}
+
+// ── ML Audit ──────────────────────────────────────────────────────────────────
+
+export interface AuditVerifyResult {
+  valid: boolean
+  checked: number
+  broken_links: { id: number; issues: string[] }[]
+  oldest_row: string | null
+  newest_row: string | null
+  message: string
+}
+
+export async function getAuditVerify(): Promise<AuditVerifyResult> {
+  const res = await api.get<AuditVerifyResult>('/api/ml-audit/verify')
+  return res.data
+}
+
+export interface AuditDecision {
+  id: number
+  child_id: string
+  placement_id: string
+  decision_type: string
+  model_name: string
+  model_version: string
+  child_demographics: Record<string, unknown>
+  output_score: number
+  output_label: string
+  output_confidence: number
+  human_overridden: boolean
+  human_decision: string
+  decided_at: string
+  hash: string
+}
+
+export interface AuditDecisionsResponse {
+  decisions: AuditDecision[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export async function getDecisionsByChildId(childId: string): Promise<AuditDecisionsResponse> {
+  const res = await api.get<AuditDecisionsResponse>('/api/ml-audit/decisions', {
+    params: { child_id: childId, decision_type: 'placement_match', limit: 1 },
+  })
+  return res.data
+}
+
+export async function getAuditDecisions(params?: {
+  child_id?: string
+  decision_type?: string
+  limit?: number
+  offset?: number
+}): Promise<AuditDecisionsResponse> {
+  const res = await api.get<AuditDecisionsResponse>('/api/ml-audit/decisions', { params })
   return res.data
 }

@@ -53,6 +53,8 @@ class FosterPlacementWorkflow:
         self._current_stage: str = ""
         self._progress: int = 0
         self._timeline: list[dict] = []
+        self._approved: bool | None = None  # None=pending, True=approved, False=rejected
+        self._approval_comment: str = ""
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -211,19 +213,34 @@ class FosterPlacementWorkflow:
             retry_policy=_retry,
         )
 
-        # Stage 6 – Supervisor Approval
+        # Stage 6 – Supervisor Approval (wait for human decision)
         self._set_stage("supervisor_approval", progress=70)
         await self._record_event(
             "supervisor_approval",
             "awaiting",
             {"workflow_id": workflow_id},
         )
+        # Wait for approve_placement or reject_placement signal
+        await workflow.wait_condition(lambda: self._approved is not None)
+
+        if not self._approved:
+            # Placement rejected — record and exit
+            await self._record_event(
+                "placement_rejected",
+                "completed",
+                {"reason": self._approval_comment or "Rejected by supervisor"},
+            )
+            return {
+                "child_id": child_id,
+                "status": "rejected",
+                "reason": self._approval_comment or "Rejected by supervisor",
+            }
 
         # Stage 7 – Placement Approved
         self._set_stage("placement_approved", progress=85)
         await self._record_event(
             "placement_approved",
-            "completed",
+            "approved",
             {"family_id": self._matched_family.get("family_id")},
         )
 
@@ -257,6 +274,24 @@ class FosterPlacementWorkflow:
         }
 
     # ── Signals ───────────────────────────────────────────────────────────────
+
+    @workflow.signal
+    async def approve_placement(self, comment: str = "") -> None:
+        self._approved = True
+        self._approval_comment = comment
+        workflow.logger.info(
+            f"foster_workflow.approved "
+            f"child_id={self._child.get('child_id', 'unknown')}"
+        )
+
+    @workflow.signal
+    async def reject_placement(self, comment: str = "") -> None:
+        self._approved = False
+        self._approval_comment = comment
+        workflow.logger.info(
+            f"foster_workflow.rejected "
+            f"child_id={self._child.get('child_id', 'unknown')}"
+        )
 
     @workflow.signal
     async def weekly_check_in(self, score: int, notes: str) -> None:

@@ -3,7 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { BrainCircuit, Search, AlertCircle, RefreshCw } from 'lucide-react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { InterventionBuilder, type Intervention } from '@/components/InterventionBuilder'
+import { InterventionBuilder } from '@/components/InterventionBuilder'
+import type { Intervention } from '@/components/InterventionBuilder'
 import { SideBySideCharts } from '@/components/SideBySideCharts'
 import { ScenarioManager } from '@/components/ScenarioManager'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
@@ -17,11 +18,8 @@ import {
   runSimulation,
   saveScenario,
   getCaseConferencePdf,
-  type SimulateResponse,
-  type ScenarioData,
-  type InterventionComponent,
-  type TwinState,
 } from '@/services/foster'
+import type { SimulateResponse, ScenarioData, InterventionComponent } from '@/services/foster'
 import { cn } from '@/lib/utils'
 
 type Screen = 'builder' | 'results' | 'scenarios'
@@ -110,25 +108,7 @@ function interventionToLabel(domain: string): string {
 }
 
 function enrichFeatures(features: Record<string, unknown> | undefined): Record<string, unknown> {
-  const base: Record<string, unknown> = {
-    age: 8,
-    gender: 'Female',
-    special_needs: 'None',
-    emergency_level: 'Medium',
-    intake_reason: 'Parental neglect',
-    school: 'Washington Elementary',
-    weeks_in_placement: 12,
-    current_risk_score: 55,
-    current_drift_score: 30,
-    placement_history: 2,
-    school_stability: 65,
-    mental_health_score: 45,
-    stability_score: 50,
-    predicted_outcome: 'uncertain',
-    school_attendance: 80,
-    ...(features || {}),
-  }
-  return base
+  return features || {}
 }
 
 export default function TwinPage() {
@@ -425,14 +405,7 @@ export default function TwinPage() {
               <div className="absolute inset-0 flex items-center">
                 <span className="w-full border-t border-border" />
               </div>
-              <div className="relative flex justify-center text-xs">
-                <span className="bg-card px-2 text-muted-foreground">or try a quick demo</span>
-              </div>
             </div>
-            <Button variant="secondary" className="w-full" onClick={handleDemoMode}>
-              <BrainCircuit className="w-4 h-4" />
-              Launch Microsoft Build Demo
-            </Button>
           </div>
         </GlassCard>
 

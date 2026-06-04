@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +136,7 @@ class CrisisPredictor:
             # Days in current placement
             placement_created = placement.get("created_at")
             days_in_placement = (
-                (datetime.now() - placement_created.replace(tzinfo=None)).days
+                (datetime.now(timezone.utc) - placement_created.replace(tzinfo=timezone.utc)).days
                 if placement_created
                 else 30
             )

@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Bot, Zap, Sparkles, BarChart3, Clock, ArrowRight, FileText, Terminal } from 'lucide-react'
+import { X, Bot, Zap, Sparkles, BarChart3, ArrowRight, FileText, Terminal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TimelineEvent } from '@/types/workflow-timeline'
 
@@ -73,7 +73,7 @@ export default function TimelineDetailDrawer({ event, onClose }: TimelineDetailD
                   <InfoItem label="Status" value={event.status} />
                   <InfoItem label="Agent" value={event.agentName} />
                   <InfoItem label="Latency" value={`${event.latency.toFixed(2)}s`} />
-                  <InfoItem label="Confidence" value={`${event.confidenceScore}%`} />
+                  <InfoItem label="Confidence" value={event.confidenceScore != null ? `${event.confidenceScore}%` : '—'} />
                   {event.timestamp && <InfoItem label="Timestamp" value={new Date(event.timestamp).toLocaleString()} />}
                   {event.startedAt && <InfoItem label="Started" value={new Date(event.startedAt).toLocaleTimeString()} />}
                   {event.completedAt && <InfoItem label="Completed" value={new Date(event.completedAt).toLocaleTimeString()} />}
@@ -131,11 +131,7 @@ export default function TimelineDetailDrawer({ event, onClose }: TimelineDetailD
               )}
 
               {/* Details */}
-              {event.details && (
-                <Section icon={FileText} title="Additional Details">
-                  <p className="text-xs text-muted-foreground">{event.details}</p>
-                </Section>
-              )}
+              {renderAdditionalDetails(event)}
             </div>
           </motion.div>
         </motion.div>
@@ -171,6 +167,75 @@ function InfoItem({ label, value }: { label: string; value: string }) {
     <div className="p-2 rounded-lg bg-surface-alt border border-border">
       <p className="text-[10px] text-muted-foreground">{label}</p>
       <p className="text-xs font-medium text-foreground truncate capitalize">{value}</p>
+    </div>
+  )
+}
+
+function tryJsonParse(v: unknown): unknown {
+  if (typeof v === 'string') {
+    try { return JSON.parse(v) } catch { return v }
+  }
+  return v
+}
+
+function renderValue(v: unknown): React.ReactNode {
+  if (v == null) return <span className="text-muted-foreground">—</span>
+  if (Array.isArray(v)) {
+    return (
+      <ul className="space-y-0.5 list-disc list-inside">
+        {v.map((item, i) => (
+          <li key={i}>{renderValue(item)}</li>
+        ))}
+      </ul>
+    )
+  }
+  if (typeof v === 'object') {
+    return (
+      <div className="space-y-0.5">
+        {Object.entries(v as Record<string, unknown>).map(([k, val]) => (
+          <div key={k} className="flex gap-2 text-xs">
+            <span className="text-muted-foreground shrink-0">{k.replace(/_/g, ' ')}:</span>
+            <span className="text-foreground">{renderValue(val)}</span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  return <span>{String(v)}</span>
+}
+
+const FILTERED_PAYLOAD_KEYS = new Set([
+  'agent', 'progress', 'timestamp', 'action', 'output', 'input',
+  'latency', 'reasoning', 'logs', 'inputData', 'outputData',
+  'confidence', 'confidence_score', 'match_score', 'matchScore',
+  'risk_score', 'riskScore', 'details', 'message', 'domain',
+])
+
+function renderAdditionalDetails(event: TimelineEvent): React.ReactNode {
+  const rawPayload = event.payload as Record<string, unknown> | undefined
+  if (!rawPayload) return null
+
+  const parsed = Object.fromEntries(
+    Object.entries(rawPayload).map(([k, v]) => [k, tryJsonParse(v)]),
+  )
+  const entries = Object.entries(parsed).filter(
+    ([k]) => !FILTERED_PAYLOAD_KEYS.has(k),
+  )
+  if (entries.length === 0) return null
+
+  return (
+    <div className="p-4 rounded-xl border border-glass-border">
+      <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-2">
+        Payload Details
+      </p>
+      <div className="space-y-1">
+        {entries.map(([k, v]) => (
+          <div key={k} className="flex flex-col text-xs text-muted-foreground bg-surface-alt px-2.5 py-1.5 rounded border border-border">
+            <span className="font-medium capitalize mb-0.5">{k.replace(/_/g, ' ')}</span>
+            <div className="font-mono">{renderValue(v)}</div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

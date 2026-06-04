@@ -12,6 +12,7 @@ import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glas
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { useShapExplanation } from '@/hooks/use-foster'
+import { normalizeWorkflowId } from '@/services/foster'
 import { DataLoader } from '@/components/data-loader'
 
 function ShapPanel({ workflowId }: { workflowId: string }) {
@@ -84,7 +85,7 @@ export default function FairnessPage() {
 
   const handleLookup = () => {
     const trimmed = inputId.trim()
-    if (trimmed) setActiveId(trimmed)
+    if (trimmed) setActiveId(normalizeWorkflowId(trimmed))
   }
 
   return (

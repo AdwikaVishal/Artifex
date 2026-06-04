@@ -365,7 +365,7 @@ export default function ReferralPage() {
               <div className="glass-card p-4 space-y-2">
                 <div className="flex items-center gap-2 text-primary">
                   <Sparkles size={14} />
-                  <span className="text-xs font-semibold uppercase tracking-wider">AI-Powered</span>
+                  <span className="text-xs font-semibold uppercase tracking-wider">Automated</span>
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed">
                   The orchestration engine will automatically match, analyze risk, and route this referral through the approval workflow.

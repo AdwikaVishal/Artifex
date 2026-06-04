@@ -78,12 +78,12 @@ class TwinStateData(BaseModel):
     """Validated model for the internal twin state dict."""
     child_id: str
     placement_id: str | None = None
-    as_of: str = ""
+    as_of: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     current_features: dict[str, Any] = Field(default_factory=dict)
     outcome_probs: dict[str, Any] | None = None
     pending_simulations: list[dict[str, Any]] | None = None
     version: int = 1
-    stale_at: str = ""
+    stale_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=7))
 
 
 class TwinStateResponse(BaseModel):
@@ -164,51 +164,96 @@ async def _get_or_create_twin_state(child_id: str, pool: Any) -> dict[str, Any]:
         child_id,
     )
 
-    crisis = await pool.fetchrow(
-        """
-        SELECT disruption_probability, prediction_date
-        FROM crisis_predictions
-        WHERE placement_id = $1
-        ORDER BY prediction_date DESC LIMIT 1
-        """,
-        placement_id,
-    ) if placement_id else None
+    # Query the latest workflow event data for risk/match/confidence scores
+    workflow_scores: dict[str, Any] = {}
+    if placement_id:
+        wf_row = await pool.fetchrow(
+            """
+            SELECT data FROM workflow_events
+            WHERE workflow_id = $1 AND data IS NOT NULL
+            ORDER BY timestamp DESC LIMIT 1
+            """,
+            placement_id,
+        )
+        if wf_row:
+            raw = wf_row["data"]
+            if isinstance(raw, str):
+                try:
+                    workflow_scores = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    workflow_scores = {}
+            elif isinstance(raw, dict):
+                workflow_scores = raw
 
-    # Compose current_features JSONB
+    # Fix special_needs: DB stores "f"/"t" as string
+    raw_special_needs = child.get("special_needs")
+    if isinstance(raw_special_needs, str):
+        special_needs = raw_special_needs.lower() in ("t", "true", "yes", "1")
+    elif isinstance(raw_special_needs, bool):
+        special_needs = raw_special_needs
+    else:
+        special_needs = bool(raw_special_needs) if raw_special_needs else False
+
+    # Extract scores from workflow data, fall back to placement.risk_score
+    wf_risk = workflow_scores.get("risk_score")
+    wf_match = workflow_scores.get("match_score")
+    wf_confidence = workflow_scores.get("confidence_score")
+    wf_family = workflow_scores.get("recommended_family")
+
     placement_count = await pool.fetchval(
         "SELECT COUNT(*) FROM placements WHERE child_id = $1", child_id
     ) if pool else None
 
-    current_features: dict[str, Any] = {
-        "age": child.get("age"),
-        "gender": child.get("gender"),
-        "special_needs": child.get("special_needs"),
-        "emergency_level": child.get("emergency_level"),
-        "intake_reason": child.get("intake_reason"),
-        "school": child.get("school"),
-        "weeks_in_placement": None,
-        "current_risk_score": float(crisis["disruption_probability"]) * 100 if crisis else None,
-        "current_drift_score": float(drift["drift_score"]) if drift and drift.get("drift_score") else None,
-        "placement_history": placement_count or 0,
-        "school_stability": 65 if child.get("school") else 30,
-        "mental_health_score": round(100 - (float(crisis["disruption_probability"]) * 100) * 0.6) if crisis else 50,
-        "stability_score": round(100 - (float(crisis["disruption_probability"]) * 100) * 0.8) if crisis else 50,
-        "predicted_outcome": "stable" if (crisis and float(crisis["disruption_probability"]) < 0.4) else "disrupted" if (crisis and float(crisis["disruption_probability"]) > 0.6) else "uncertain",
-        "school_attendance": 85,
-    }
-
+    # Weeks in current placement
+    weeks: int | None = None
     if placement:
         created = placement.get("created_at")
         if created:
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
             delta = datetime.now(timezone.utc) - created
-            current_features["weeks_in_placement"] = max(1, delta.days // 7)
+            weeks = max(1, delta.days // 7)
 
-    # Default outcome_probs
+    # Risk score: workflow > placement > None
+    risk_score: float | None = None
+    if wf_risk is not None:
+        risk_score = float(wf_risk)
+    elif placement and placement.get("risk_score") is not None:
+        risk_score = float(placement["risk_score"])
+
+    match_score: float | None = float(wf_match) if wf_match is not None else None
+    confidence_score: float | None = float(wf_confidence) if wf_confidence is not None else None
+
+    current_features: dict[str, Any] = {
+        "age": child.get("age"),
+        "gender": child.get("gender"),
+        "special_needs": special_needs,
+        "emergency_level": child.get("emergency_level"),
+        "intake_reason": child.get("intake_reason"),
+        "school": child.get("school"),
+        "weeks_in_placement": weeks,
+        "current_risk_score": risk_score,
+        "match_score": match_score,
+        "confidence_score": confidence_score,
+        "current_drift_score": float(drift["drift_score"]) if drift and drift.get("drift_score") else None,
+        "placement_history": placement_count or 0,
+        "school_stability": 65 if child.get("school") else (30 if child.get("school") is not None else None),
+        "recommended_family": wf_family,
+    }
+
+    logger.info(
+        "twin.features_loaded",
+        child_id=child_id,
+        feature_count=len([k for k, v in current_features.items() if v is not None]),
+        risk_score=risk_score,
+        match_score=match_score,
+        confidence_score=confidence_score,
+    )
+
+    # Outcome probabilities from crisis_predictions or derive from risk_score
     outcome_probs: dict[str, Any] | None = None
-    if crisis:
-        p = float(crisis["disruption_probability"])
+    if risk_score is not None:
+        p = max(0.0, min(1.0, risk_score / 100.0))
         outcome_probs = {
             "stable": round(1.0 - p, 4),
             "disrupted": round(p, 4),
@@ -284,9 +329,9 @@ def _build_simulated_response(
     )
 
     sim_id = f"sim_{uuid.uuid4().hex[:12]}"
-    n_hist = 1842
+    n_hist = current_features.get("placement_history", 0) or 0
 
-    # Baseline: derive from current_risk_score or default
+    # Baseline: derive from current_risk_score
     base_risk = current_features.get("current_risk_score")
     if base_risk is None:
         base_risk = _u(40, 70)
@@ -317,6 +362,15 @@ def _build_simulated_response(
             "value": iv.get("value", ""),
             "individual_effect": effect,
         })
+
+    logger.info(
+        "twin.simulation_complete",
+        child_id=child_id,
+        simulation_id=sim_id,
+        n_historical_placements=n_hist,
+        base_risk_score=base_risk,
+        total_effect_size=round(total_effect, 2),
+    )
 
     # Interaction effect for compound interventions
     if len(interventions) >= 2:
@@ -496,13 +550,28 @@ async def simulate(
     async with pool.acquire() as conn:
         try:
             state = await _get_or_create_twin_state(child_id, conn)
+            features = state.get("current_features", {}) or {}
+
+            # Require minimum data for a meaningful simulation
+            risk_score = features.get("current_risk_score")
+            if risk_score is None:
+                logger.warning(
+                    "twin.insufficient_data",
+                    child_id=child_id,
+                    feature_count=len([k for k, v in features.items() if v is not None]),
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="Insufficient data for simulation — no risk score available. "
+                           "Ensure the child has completed a risk assessment.",
+                )
 
             interventions_dicts = [iv.model_dump() for iv in request.interventions]
             result = _build_simulated_response(
                 child_id=child_id,
                 interventions=interventions_dicts,
                 horizon_days=request.horizon_days,
-                current_features=state.get("current_features", {}),
+                current_features=features,
             )
 
             await _write_audit_entry(
@@ -752,7 +821,7 @@ async def case_conference_pdf(
         "message": "PDF generation payload ready — PDF rendering will be implemented server-side",
         "child_info": child_info,
         "scenarios": scenarios,
-        "n_historical_placements": 1842,
+        "n_historical_placements": feat.get("placement_history", 0),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "pdf_url": f"/api/twin/{child_id}/case-conference-pdf/render",
         "footer_disclosure": (

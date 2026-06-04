@@ -1,13 +1,12 @@
 import { useDashboardMetrics, useRiskDistribution, useDashboardEvents, useAgentStatuses, useMlInsights, useWorkflowActivity, usePlacements } from '@/hooks/use-foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle, GlassCardValue } from '@/components/ui/glass-card'
 import { DataLoader } from '@/components/data-loader'
-import { StatusBadge, EmergencyBadge } from '@/components/ui/badge'
-import { Separator } from '@/components/ui/separator'
+import { StatusBadge } from '@/components/ui/badge'
 import { formatDate } from '@/lib/utils'
 import { motion } from 'framer-motion'
-import { Activity, CheckCircle, Home, AlertTriangle, TrendingUp, TrendingDown, ArrowRight, Bot, BrainCircuit } from 'lucide-react'
+import { Activity, CheckCircle, Home, AlertTriangle, TrendingUp, TrendingDown, Bot, BrainCircuit } from 'lucide-react'
 import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie,
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie,
 } from 'recharts'
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -340,6 +339,7 @@ export default function DashboardPage() {
     let ws: WebSocket
     let shouldClose = false
     let retryTimeout: ReturnType<typeof setTimeout> | null = null
+    let retryCount = 0
 
     function connect() {
       ws = new WebSocket(url)
@@ -347,6 +347,7 @@ export default function DashboardPage() {
 
       ws.onopen = () => {
         setWsConnected(true)
+        retryCount = 0
       }
 
       ws.onmessage = (ev) => {
@@ -354,7 +355,6 @@ export default function DashboardPage() {
           const data = JSON.parse(ev.data)
           if (data.type === 'ping') return
           if (data.placements) {
-            // Invalidate all dashboard queries to trigger a refresh
             queryClient.invalidateQueries({ queryKey: ['dashboard'] })
             queryClient.invalidateQueries({ queryKey: ['placements'] })
             queryClient.invalidateQueries({ queryKey: ['approvals'] })
@@ -365,7 +365,9 @@ export default function DashboardPage() {
       ws.onclose = (ev) => {
         setWsConnected(false)
         if (shouldClose || ev.code === 1008) return
-        retryTimeout = setTimeout(() => connect(), 5000)
+        retryCount++
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000)
+        retryTimeout = setTimeout(() => connect(), delay)
       }
 
       ws.onerror = () => {

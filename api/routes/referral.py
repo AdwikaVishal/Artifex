@@ -130,15 +130,7 @@ async def submit_referral(
                     "ON CONFLICT (workflow_id) DO NOTHING",
                     workflow_id, referral.child_id,
                 )
-                try:
-                    await conn.execute(
-                        "INSERT INTO active_placements "
-                        "  (workflow_id, child_id, family_id, status) "
-                        "VALUES ($1, $2, 'unassigned', 'pending_review')",
-                        workflow_id, referral.child_id,
-                    )
-                except Exception:
-                    pass  # row may already exist
+
         except Exception as exc:  # noqa: BLE001
             logger.warning("api.referral.db_error", error=str(exc))
 
@@ -174,9 +166,30 @@ async def _run_pipeline_simulation(workflow_id: str, referral: "ChildReferral") 
     from api.db import (  # noqa: PLC0415
         store_workflow_event, store_prediction, store_placement, get_pool as _get_pool
     )
+    from api.routes.timeline import auto_create_child_event  # noqa: PLC0415
 
     pool = _get_pool()
     child_id = referral.child_id
+
+    # Check if pipeline already running for this workflow
+    try:
+        if pool is not None:
+            async with pool.acquire() as _conn:
+                existing = await _conn.fetchval(
+                    "SELECT status FROM workflow_status WHERE workflow_id = $1",
+                    workflow_id,
+                )
+                if existing in ("pending_supervisor", "completed", "running"):
+                    logger.info("pipeline_sim.already_running", workflow_id=workflow_id, status=existing)
+                    return
+                await _conn.execute(
+                    "INSERT INTO workflow_status (workflow_id, status, current_stage, progress, updated_at) "
+                    "VALUES ($1, 'running', 'started', 0, NOW()) "
+                    "ON CONFLICT (workflow_id) DO UPDATE SET status = 'running', updated_at = NOW()",
+                    workflow_id,
+                )
+    except Exception:
+        pass
 
     async def _stage(stage: str, status: str, data: dict, delay: float = 1.5) -> None:
         start = _time.perf_counter()
@@ -200,25 +213,45 @@ async def _run_pipeline_simulation(workflow_id: str, referral: "ChildReferral") 
         recommended_family_id = None
         family_json = None
 
-        # Try to pick a real family from DB
-        if pool is not None:
-            try:
-                async with pool.acquire() as conn:
-                    fam_row = await conn.fetchrow(
-                        "SELECT family_id, name, location, capacity FROM families "
-                        "WHERE active = TRUE ORDER BY RANDOM() LIMIT 1"
-                    )
-                    if fam_row:
-                        recommended_family_id = fam_row["family_id"]
-                        recommended_family_name = fam_row["name"]
-                        family_json = {
-                            "family_id": fam_row["family_id"],
-                            "name": fam_row["name"],
-                            "location": fam_row["location"],
-                            "capacity": fam_row["capacity"],
-                        }
-            except Exception as _e:  # noqa: BLE001
-                logger.warning("pipeline_sim.family_lookup_error", error=str(_e))
+        # Use XGBoost placement recommender instead of random matching
+        try:
+            from services.placement_recommender import recommend_foster_family  # noqa: PLC0415
+            child_dict = {
+                "child_id": referral.child_id,
+                "age": referral.age,
+                "gender": referral.gender,
+                "special_needs": referral.special_needs,
+                "siblings": max(0, int(referral.sibling_count or 0)),
+                "sibling_group": referral.sibling_group,
+                "capacity_needed": max(1, int(referral.capacity_needed or 1)),
+                "preferred_location": referral.preferred_location or "",
+                "languages": referral.languages or "",
+                "removal_reason": referral.notes or "Other",
+                "emergency_level": referral.emergency_level or "normal",
+            }
+            result = await recommend_foster_family(child_dict, top_n=3)
+            if result and result.get("recommended_family"):
+                fam = result["recommended_family"]
+                recommended_family_id = fam.get("family_id")
+                recommended_family_name = fam.get("name")
+                family_json = {
+                    "family_id": fam.get("family_id"),
+                    "name": fam.get("name"),
+                    "location": fam.get("location"),
+                    "capacity": fam.get("capacity"),
+                }
+                risk_score = result.get("risk_score", risk_score)
+                match_score = result.get("match_score", match_score)
+                confidence = result.get("confidence_score", confidence)
+                logger.info(
+                    "pipeline_sim.recommender_match",
+                    workflow_id=workflow_id,
+                    family=recommended_family_name,
+                    match_score=match_score,
+                    confidence=confidence,
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("pipeline_sim.recommender_error", error=str(_e))
 
         # ── Use Groq to generate a real risk assessment ──────────────────────
         risk_explanation = f"Risk score {risk_score:.0f} based on child profile analysis."
@@ -270,13 +303,18 @@ async def _run_pipeline_simulation(workflow_id: str, referral: "ChildReferral") 
         else:
             risk_explanation = f"Risk score {risk_score:.0f} based on child profile analysis."
 
-        feature_importance = [
-            {"feature": "age_match", "importance": round(_random.uniform(0.15, 0.35), 3)},
-            {"feature": "special_needs_trained", "importance": round(_random.uniform(0.10, 0.30), 3)},
-            {"feature": "location_proximity", "importance": round(_random.uniform(0.10, 0.25), 3)},
-            {"feature": "experience_level", "importance": round(_random.uniform(0.08, 0.20), 3)},
-            {"feature": "language_match", "importance": round(_random.uniform(0.05, 0.15), 3)},
-        ]
+        try:
+            feature_importance = result.get("feature_importance", [])
+        except NameError:
+            feature_importance = []
+        if not feature_importance:
+            feature_importance = [
+                {"feature": "age_match", "importance": round(_random.uniform(0.15, 0.35), 3)},
+                {"feature": "special_needs_trained", "importance": round(_random.uniform(0.10, 0.30), 3)},
+                {"feature": "location_proximity", "importance": round(_random.uniform(0.10, 0.25), 3)},
+                {"feature": "experience_level", "importance": round(_random.uniform(0.08, 0.20), 3)},
+                {"feature": "language_match", "importance": round(_random.uniform(0.05, 0.15), 3)},
+            ]
 
         # ── Stage 1: Referral Submitted (Intake Agent) ───────────────────────
         await _stage("referral_submitted", "completed", {
@@ -563,54 +601,29 @@ async def _run_pipeline_simulation(workflow_id: str, referral: "ChildReferral") 
         except Exception as _e:  # noqa: BLE001
             logger.warning("pipeline_sim.approval_creation_error", workflow_id=workflow_id, error=str(_e))
 
-        # ── Stage 9: Placement Created (Monitoring Agent) ────────────────────
-        await _stage("placement_created", "pending", {
+        # ── Stage 9: Awaiting Approval ───────────────────────────────────────
+        await _stage("awaiting_approval", "pending", {
             "agent": "monitoring_agent",
-            "action": "Created placement record",
-            "output": f"Placement record ready for {recommended_family_name or 'Pending'}",
+            "action": "Awaiting supervisor decision",
+            "output": "Placement will be created upon approval",
             "progress": 98,
             "confidence": 0.93,
             "confidence_score": 93.0,
             "reasoning": [
-                "Placement record structure created in state database",
-                "21-day adjustment tracking schedule initialized",
-                "Automated check-in schedule configured for weekly cadence",
+                "Placement recommendation ready for supervisor review",
+                "Active placement will be created upon approval",
+                "Monitoring schedule will be configured after activation",
             ],
             "input": f"Approved recommendation: {recommended_family_name or 'Pending'} for {child_id}",
             "inputData": f"Approved recommendation: {recommended_family_name or 'Pending'} for {child_id}",
-            "outputData": "Placement record ready for activation upon supervisor approval",
-            "decisionExplanation": "Placement record created in state database. 21-day adjustment tracking initiated with automated check-in schedule.",
+            "outputData": "Awaiting supervisor approval to create active placement",
+            "decisionExplanation": "Placement recommendation ready. Active placement record and monitoring schedule will be created upon supervisor approval.",
             "logs": [
-                "[Monitoring] Creating placement record",
-                "[Monitoring] 21-day adjustment tracking initiated",
-                "[Monitoring] Automated check-in schedule configured",
+                "[Monitoring] Awaiting supervisor decision",
+                "[Monitoring] Placement record ready for activation",
+                "[Monitoring] Monitoring schedule pending approval",
             ],
-            "details": "Placement record ready for activation",
-        }, delay=0.3)
-
-        # ── Stage 10: Monitoring Active (Monitoring Agent) ───────────────────
-        await _stage("monitoring_active", "pending", {
-            "agent": "monitoring_agent",
-            "action": "Activated monitoring",
-            "output": "Monitoring schedule configured",
-            "progress": 100,
-            "confidence": 0.97,
-            "confidence_score": 97.0,
-            "reasoning": [
-                "Monitoring plan configured for 90-day initial period",
-                "Crisis alert thresholds set based on risk profile",
-                "Placement stability tracking initiated with weekly check-ins",
-            ],
-            "input": f"Placement configuration: {recommended_family_name or 'Pending'}, child {child_id}, 90-day initial period",
-            "inputData": f"Placement configuration: {recommended_family_name or 'Pending'}, child {child_id}, 90-day initial period",
-            "outputData": "Monitoring active: weekly check-ins, crisis alert thresholds configured",
-            "decisionExplanation": "Monitoring plan configured for 90-day initial period. Crisis alert thresholds set based on risk profile. Placement stability tracking initiated.",
-            "logs": [
-                "[Monitoring] Activating monitoring plan",
-                "[Monitoring] Crisis thresholds set",
-                "[Monitoring] Placement tracking initiated",
-            ],
-            "details": "Monitoring plan configured for 90-day period with weekly check-ins",
+            "details": "Awaiting supervisor approval",
         }, delay=0.3)
 
         logger.info(
@@ -620,9 +633,46 @@ async def _run_pipeline_simulation(workflow_id: str, referral: "ChildReferral") 
             match_score=match_score,
             recommended_family=recommended_family_name,
         )
+        try:
+            if pool is not None:
+                async with pool.acquire() as _conn:
+                    await _conn.execute(
+                        "UPDATE workflow_status SET status = 'pending_supervisor', updated_at = NOW() "
+                        "WHERE workflow_id = $1",
+                        workflow_id,
+                    )
+        except Exception:
+            pass
+
+        # Auto-generate child events for pipeline completion
+        await auto_create_child_event(
+            child_id=child_id,
+            event_type="placement",
+            title="Referral Submitted",
+            description=f"Risk assessment complete ({risk_score:.0f}%). "
+                        f"Recommended family: {recommended_family_name}. "
+                        f"Awaiting supervisor approval.",
+            severity="medium" if risk_score and risk_score > 60 else "low",
+            payload={
+                "workflow_id": workflow_id,
+                "risk_score": risk_score,
+                "match_score": match_score,
+                "recommended_family": recommended_family_name,
+            },
+        )
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("pipeline_sim.error", workflow_id=workflow_id, error=str(exc))
+        try:
+            if pool is not None:
+                async with pool.acquire() as _conn:
+                    await _conn.execute(
+                        "UPDATE workflow_status SET status = 'failed', updated_at = NOW() "
+                        "WHERE workflow_id = $1",
+                        workflow_id,
+                    )
+        except Exception:
+            pass
 
 
 @router.post("/events", status_code=202)
@@ -736,6 +786,11 @@ async def ingest_event(
                 async with pool.acquire() as conn:
                     await conn.execute(
                         "UPDATE placements SET status = 'closed', updated_at = NOW() "
+                        "WHERE workflow_id = $1",
+                        workflow_id,
+                    )
+                    await conn.execute(
+                        "UPDATE active_placements SET status = 'closed' "
                         "WHERE workflow_id = $1",
                         workflow_id,
                     )

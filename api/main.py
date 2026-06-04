@@ -449,6 +449,7 @@ from .routes.timeline  import router as timeline_router   # noqa: E402
 from .websockets.dashboard import router as ws_dashboard_router  # noqa: E402
 from .websockets.logs      import router as ws_logs_router       # noqa: E402
 from .websockets.workflow  import router as ws_workflow_router   # noqa: E402
+from .websockets.child     import router as ws_child_router      # noqa: E402
 
 app.include_router(dashboard_router)
 app.include_router(families_router)
@@ -464,6 +465,7 @@ app.include_router(timeline_router)
 app.include_router(ws_dashboard_router)
 app.include_router(ws_logs_router)
 app.include_router(ws_workflow_router)
+app.include_router(ws_child_router)
 
 
 # ── Core swarm routes (kept in main.py – they depend on Temporal client) ─────

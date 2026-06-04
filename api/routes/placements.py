@@ -30,6 +30,70 @@ _api_latest_placements: list[dict[str, Any]] = []
 _placements_lock_ref: Any = None  # asyncio.Lock set by main.py
 
 
+async def _log_placement_audit(
+    db: Any,
+    workflow_id: str,
+    child_id: str,
+    decision: str,
+    risk_score: float,
+    user_id: str,
+    family_json: Any,
+) -> None:
+    """Log a placement approval/rejection to the ML decision audit table."""
+    demographics = {}
+    try:
+        child_row = await db.fetchrow(
+            "SELECT gender, special_needs, emergency_level, age FROM children WHERE child_id = $1",
+            child_id,
+        )
+        if child_row:
+            demographics = {
+                "gender": child_row["gender"],
+                "special_needs": child_row["special_needs"],
+                "emergency_level": child_row["emergency_level"],
+                "age": child_row["age"],
+            }
+    except Exception:
+        demographics = {}
+
+    family = {}
+    if isinstance(family_json, str):
+        try:
+            family = json.loads(family_json)
+        except (json.JSONDecodeError, TypeError):
+            family = {}
+    elif isinstance(family_json, dict):
+        family = family_json
+
+    score = risk_score
+    label = "high" if score > 75 else "medium" if score > 50 else "low"
+
+    await db.execute(
+        """
+        INSERT INTO ml_decision_audit
+            (child_id, placement_id, caseworker_id,
+             decision_type, model_name, model_version,
+             input_features, child_demographics,
+             output_score, output_label, output_confidence,
+             human_overridden, human_decision, overridden_by, overridden_at)
+        VALUES ($1, $2, $3,
+                'placement_match', 'placement_matcher', 'v1',
+                $4::jsonb, $5::jsonb,
+                $6, $7, NULL,
+                FALSE, $8, $9, NOW())
+        """,
+        child_id,
+        workflow_id,
+        user_id,
+        json.dumps(family),
+        json.dumps(demographics),
+        score,
+        label,
+        decision,
+        user_id,
+    )
+
+
 def set_placement_store(store: list, lock: Any) -> None:
     """Called by main.py to share the in-process cache and lock."""
     global _api_latest_placements, _placements_lock_ref
@@ -247,10 +311,24 @@ async def approve_placement(
             "UPDATE placements SET status = $2, notes = $3 WHERE workflow_id = $1",
             approval.workflow_id, new_status, approval.comment,
         )
-        await conn.execute(
-            "UPDATE active_placements SET status = $2 WHERE workflow_id = $1",
-            approval.workflow_id, new_status,
-        )
+        if approval.approved:
+            # Deactivate any other active placements for this child
+            await conn.execute(
+                "UPDATE active_placements SET status = 'closed' "
+                "WHERE child_id = (SELECT child_id FROM placements WHERE workflow_id = $1) "
+                "AND workflow_id != $1 AND status = 'active'",
+                approval.workflow_id,
+            )
+            await conn.execute(
+                "INSERT INTO active_placements "
+                "  (workflow_id, child_id, family_id, status) "
+                "SELECT $1, child_id, "
+                "  COALESCE((family_json->>'family_id')::text, 'unassigned'), "
+                "  'active' "
+                "FROM placements WHERE workflow_id = $1 "
+                "ON CONFLICT (workflow_id) DO UPDATE SET status = 'active'",
+                approval.workflow_id,
+            )
         # Mark supervisor_approval as completed so buildStagesFromTimeline
         # no longer treats it as the current active stage.
         await conn.execute(
@@ -285,13 +363,24 @@ async def approve_placement(
                 family = json.loads(fj) if isinstance(fj, str) else (fj or {})
                 family_id = family.get("family_id") or family.get("id")
                 if family_id:
-                    # placement_history has no unique constraint – plain INSERT
-                    await conn.execute(
-                        "INSERT INTO placement_history "
-                        "  (child_id, family_id, placement_start, outcome, disruption, duration_days) "
-                        "VALUES ($1, $2, NOW(), 'active', FALSE, 0)",
+                    existing_hist = await conn.fetchval(
+                        "SELECT id FROM placement_history "
+                        "WHERE child_id = $1 AND family_id = $2 AND placement_start::date = CURRENT_DATE",
                         placement["child_id"], family_id,
                     )
+                    if not existing_hist:
+                        await conn.execute(
+                            "INSERT INTO placement_history "
+                            "  (child_id, family_id, placement_start, outcome, disruption, duration_days) "
+                            "VALUES ($1, $2, NOW(), 'active', FALSE, 0)",
+                            placement["child_id"], family_id,
+                        )
+
+                # Log to ML decision audit table
+                await _log_placement_audit(
+                    conn, approval.workflow_id, placement["child_id"],
+                    new_status, risk_score, user["user_id"], placement.get("family_json"),
+                )
 
     # ── Emit workflow event so the timeline & WebSocket update live ─────
     try:
@@ -327,6 +416,32 @@ async def approve_placement(
                  "risk_score": risk_score},
         request=request,
     )
+
+    # Auto-generate child event for placement approval/rejection
+    try:
+        from api.routes.timeline import auto_create_child_event  # noqa: PLC0415
+        _pool2 = get_pool()
+        if _pool2 is not None:
+            async with _pool2.acquire() as _c:
+                _cr = await _c.fetchval(
+                    "SELECT child_id FROM placements WHERE workflow_id = $1",
+                    approval.workflow_id,
+                )
+            if _cr:
+                await auto_create_child_event(
+                    child_id=_cr,
+                    event_type="placement",
+                    title="Placement Approved" if approval.approved else "Placement Rejected",
+                    description=approval.comment or "",
+                    severity="low" if approval.approved else "high",
+                    payload={
+                        "workflow_id": approval.workflow_id,
+                        "risk_score": risk_score,
+                    },
+                )
+    except Exception:
+        logger.warning("api.approve.child_event_error", workflow_id=approval.workflow_id)
+
     return {"status": new_status}
 
 
@@ -348,10 +463,24 @@ async def supervisor_approve(
             "UPDATE placements SET status = $2, notes = $3 WHERE workflow_id = $1",
             approval.workflow_id, new_status, approval.comment,
         )
-        await conn.execute(
-            "UPDATE active_placements SET status = $2 WHERE workflow_id = $1",
-            approval.workflow_id, new_status,
-        )
+        if approval.approved:
+            # Deactivate any other active placements for this child
+            await conn.execute(
+                "UPDATE active_placements SET status = 'closed' "
+                "WHERE child_id = (SELECT child_id FROM placements WHERE workflow_id = $1) "
+                "AND workflow_id != $1 AND status = 'active'",
+                approval.workflow_id,
+            )
+            await conn.execute(
+                "INSERT INTO active_placements "
+                "  (workflow_id, child_id, family_id, status) "
+                "SELECT $1, child_id, "
+                "  COALESCE((family_json->>'family_id')::text, 'unassigned'), "
+                "  'active' "
+                "FROM placements WHERE workflow_id = $1 "
+                "ON CONFLICT (workflow_id) DO UPDATE SET status = 'active'",
+                approval.workflow_id,
+            )
         # Mark supervisor_approval as completed
         await conn.execute(
             "UPDATE workflow_events SET status = 'completed' "
@@ -377,20 +506,32 @@ async def supervisor_approve(
         )
         if approval.approved:
             placement = await conn.fetchrow(
-                "SELECT child_id, family_json FROM placements WHERE workflow_id = $1",
+                "SELECT child_id, family_json, risk_score FROM placements WHERE workflow_id = $1",
                 approval.workflow_id,
             )
             if placement:
                 fj = placement.get("family_json")
+                risk_score = float(placement.get("risk_score") or 0)
                 family = json.loads(fj) if isinstance(fj, str) else (fj or {})
                 family_id = family.get("family_id") or family.get("id")
                 if family_id:
-                    await conn.execute(
-                        "INSERT INTO placement_history "
-                        "  (child_id, family_id, placement_start, outcome, disruption, duration_days) "
-                        "VALUES ($1, $2, NOW(), 'active', FALSE, 0)",
+                    existing_hist = await conn.fetchval(
+                        "SELECT id FROM placement_history "
+                        "WHERE child_id = $1 AND family_id = $2 AND placement_start::date = CURRENT_DATE",
                         placement["child_id"], family_id,
                     )
+                    if not existing_hist:
+                        await conn.execute(
+                            "INSERT INTO placement_history "
+                            "  (child_id, family_id, placement_start, outcome, disruption, duration_days) "
+                            "VALUES ($1, $2, NOW(), 'active', FALSE, 0)",
+                            placement["child_id"], family_id,
+                        )
+
+                await _log_placement_audit(
+                    conn, approval.workflow_id, placement["child_id"],
+                    new_status, risk_score, user["user_id"], placement.get("family_json"),
+                )
 
     # ── Emit workflow event so the timeline & WebSocket update live ─────
     try:
@@ -444,7 +585,7 @@ async def get_crisis_prediction(
     Returns a cached prediction if one was generated within the last 24 hours;
     otherwise generates a fresh prediction and stores it.
     """
-    from datetime import datetime  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
     from api.services.crisis_predictor import get_crisis_predictor  # noqa: PLC0415
 
     pool = get_pool()
@@ -467,7 +608,7 @@ async def get_crisis_prediction(
 
     if existing:
         age_hours = (
-            datetime.now() - existing["prediction_date"].replace(tzinfo=None)
+            datetime.now(timezone.utc) - existing["prediction_date"].replace(tzinfo=timezone.utc)
         ).total_seconds() / 3600
         if age_hours < 24:
             top_reasons = existing["top_reasons"]

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Star, Edit, Trash2, FileText, Mail, ArrowLeft, Clock, ExternalLink,
+  Star, Trash2, FileText, Mail, ArrowLeft, Clock, ExternalLink,
 } from 'lucide-react'
 import { GlassCard } from '@/components/ui/glass-card'
 import { Button } from '@/components/ui/button'

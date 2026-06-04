@@ -27,6 +27,8 @@ import {
   getMonitoringSummary,
   getReasoningTraces,
   getAgentExecutions,
+  getAuditVerify,
+  getDecisionsByChildId,
   type MonitoringSummary,
   type ReasoningTrace,
   type AgentExecution,
@@ -381,5 +383,24 @@ export function useAgentExecutions(workflowId?: string) {
     queryKey: ['agent-executions', workflowId],
     queryFn: () => getAgentExecutions(workflowId),
     refetchInterval: 10000,
+  })
+}
+
+export function useAuditVerify() {
+  return useQuery({
+    queryKey: ['ml-audit', 'verify'],
+    queryFn: getAuditVerify,
+    staleTime: 1000 * 60 * 5,
+    retry: 1,
+  })
+}
+
+export function useDecisionByChildId(childId: string | null) {
+  return useQuery({
+    queryKey: ['ml-audit', 'decision', childId],
+    queryFn: () => getDecisionsByChildId(childId!),
+    enabled: !!childId,
+    retry: 1,
+    staleTime: 1000 * 60 * 2,
   })
 }

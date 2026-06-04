@@ -1,21 +1,26 @@
-/**
- * ChildrenPage – lists all children and shows the Child Life Timeline
- * for a selected child.
- */
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { Users, Search, ChevronRight, List, LayoutGrid } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
+import {
+  Users, Search, ChevronRight, Plus, X,
+  School, Stethoscope, AlertTriangle, Heart, Scale, Home, FileEdit,
+  Clock, Activity, TrendingUp, Shield, Calendar,
+} from 'lucide-react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/services/api'
-import { getTimelineEvents } from '@/services/foster'
-import type { TimelineEventV2 } from '@/services/foster'
+import {
+  getTimelineEvents, subscribeChildEventStream, quickAddEvent,
+  getChildEventStats,
+} from '@/services/foster'
+import type { TimelineEventV2, EventSeverity, QuickAddRequest } from '@/services/foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
 import { DataLoader } from '@/components/data-loader'
 import { EmergencyBadge } from '@/components/ui/badge'
 import { ChildLifeTimeline } from '@/components/ChildLifeTimeline'
-import { cn } from '@/lib/utils'
 import type { TimelineEvent } from '@/components/ChildLifeTimeline'
+import { AddEventModal } from '@/components/AddEventModal'
+import { cn } from '@/lib/utils'
 
 interface Child {
   child_id: string
@@ -29,6 +34,43 @@ interface Child {
   created_at: string | null
 }
 
+interface ChildStats {
+  child_id: string
+  child_name: string
+  age: number | null
+  emergency_level: string
+  special_needs: boolean
+  location: string
+  total_events: number
+  by_type: Record<string, number>
+  by_severity: Record<string, number>
+  last_activity: string | null
+  placement: {
+    family_id?: string
+    status?: string
+    since?: string
+  }
+}
+
+const QUICK_ADD_TYPES: { type: QuickAddRequest['event_type']; icon: React.ElementType; label: string; color: string }[] = [
+  { type: 'school', icon: School, label: '+ School Note', color: 'text-success' },
+  { type: 'incident', icon: AlertTriangle, label: '+ Incident', color: 'text-destructive' },
+  { type: 'medical', icon: Stethoscope, label: '+ Medical', color: 'text-secondary' },
+  { type: 'visit', icon: Heart, label: '+ Visit', color: 'text-warning' },
+  { type: 'legal', icon: Scale, label: '+ Legal', color: 'text-accent' },
+  { type: 'placement', icon: Home, label: '+ Placement', color: 'text-info' },
+  { type: 'note', icon: FileEdit, label: '+ Note', color: 'text-muted-foreground' },
+]
+
+const CATEGORY_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'note', label: 'Notes' },
+  { key: 'incident', label: 'Incidents' },
+  { key: 'school', label: 'School' },
+  { key: 'medical', label: 'Medical' },
+  { key: 'placement', label: 'Placement' },
+]
+
 function useChildren() {
   return useQuery({
     queryKey: ['children'],
@@ -41,42 +83,88 @@ function useChildren() {
   })
 }
 
+const SEVERITY_ICONS: Record<string, React.ElementType> = {
+  medium: Shield,
+  high: AlertTriangle,
+  critical: TrendingUp,
+}
+
 export default function ChildrenPage() {
   const { data: children, isLoading, error } = useChildren()
+  const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<'compact' | 'detailed'>('detailed')
+  const [showAddModal, setShowAddModal] = useState(false)
+  const [filterCategory, setFilterCategory] = useState('all')
+  const timelineRef = useRef<HTMLDivElement>(null)
 
   // Fetch timeline events for the selected child
   const { data: timelineData, isLoading: timelineLoading } = useQuery({
     queryKey: ['child-life-events', selectedId],
     queryFn: () => getTimelineEvents(selectedId!, { per_page: 200 }),
     enabled: !!selectedId,
-    staleTime: 1000 * 60 * 2,
+    staleTime: 1000 * 30,
     retry: 1,
   })
 
-  // Map API events to component TimelineEvent type
-  const timelineEvents: TimelineEvent[] = useMemo(() => {
-    if (!timelineData?.events) return []
-    return timelineData.events.map((ev: TimelineEventV2) => ({
-      id: ev.id,
-      child_id: ev.child_id,
-      event_type: ev.event_type as TimelineEvent['event_type'],
-      event_date: ev.event_date,
-      event_time: ev.event_time ?? undefined,
-      recorded_at: ev.recorded_at,
-      source_table: ev.source_table ?? undefined,
-      source_id: ev.source_id ?? undefined,
-      conflict_resolution: ev.conflict_resolution ?? undefined,
-      payload: ev.payload,
-      is_verified: ev.is_verified,
-      verified_by: ev.verified_by ?? undefined,
-      verified_at: ev.verified_at ?? undefined,
-      superseded_by: ev.superseded_by ?? undefined,
-      seal_level: (ev.seal_level || 'none') as TimelineEvent['seal_level'],
-    }))
-  }, [timelineData])
+  // Fetch child stats for header
+  const { data: stats } = useQuery({
+    queryKey: ['child-stats', selectedId],
+    queryFn: () => getChildEventStats(selectedId!),
+    enabled: !!selectedId,
+    staleTime: 1000 * 30,
+  })
+
+  const [liveEvents, setLiveEvents] = useState<TimelineEventV2[]>([])
+
+  // WS subscription for live events
+  useEffect(() => {
+    if (!selectedId) return
+    setLiveEvents([])
+    const sub = subscribeChildEventStream(selectedId, (event) => {
+      setLiveEvents(prev => [event, ...prev])
+      queryClient.invalidateQueries({ queryKey: ['child-life-events', selectedId] })
+      queryClient.invalidateQueries({ queryKey: ['child-stats', selectedId] })
+    })
+    return () => sub.close()
+  }, [selectedId, queryClient])
+
+  // Merge live events into timeline events
+  const allEvents: TimelineEvent[] = useMemo(() => {
+    const apiEvents: TimelineEvent[] = (timelineData?.events ?? []).map(ev => ev as TimelineEvent)
+    const liveIds = new Set(liveEvents.map(e => `live-${e.id}`))
+    const merged = [...liveEvents as TimelineEvent[]]
+    for (const ev of apiEvents) {
+      if (!liveIds.has(`live-${ev.id}`)) {
+        merged.push(ev)
+      }
+    }
+    merged.sort((a, b) => new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime())
+    return merged
+  }, [timelineData, liveEvents])
+
+  // Filter events by category
+  const filteredEvents = useMemo(() => {
+    if (filterCategory === 'all') return allEvents
+    return allEvents.filter(ev => ev.event_type === filterCategory)
+  }, [allEvents, filterCategory])
+
+  const quickAddMutation = useMutation({
+    mutationFn: (data: QuickAddRequest) => quickAddEvent(selectedId!, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['child-life-events', selectedId] })
+      queryClient.invalidateQueries({ queryKey: ['child-stats', selectedId] })
+    },
+  })
+
+  const handleSaveEvent = useCallback((data: {
+    event_type: TimelineEventV2['event_type']
+    title: string
+    description: string
+    severity: EventSeverity
+  }) => {
+    quickAddMutation.mutate(data)
+  }, [quickAddMutation])
 
   const filtered = useMemo(() => {
     if (!children) return []
@@ -90,9 +178,14 @@ export default function ChildrenPage() {
     )
   }, [children, search])
 
-  const handleEventClick = useCallback((event: TimelineEvent) => {
-    // Handled internally by ChildLifeTimeline
-  }, [])
+  const selectedChild = useMemo(
+    () => children?.find(c => c.child_id === selectedId),
+    [children, selectedId],
+  )
+
+  const childName = selectedChild
+    ? [selectedChild.first_name, selectedChild.last_name].filter(Boolean).join(' ') || selectedChild.child_id
+    : ''
 
   return (
     <motion.div
@@ -105,12 +198,12 @@ export default function ChildrenPage() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">Children</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            View child profiles and life timelines
+            Real-time child event stream
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Left: child list */}
         <div className="lg:col-span-1 space-y-3">
           <GlassCard>
@@ -142,7 +235,7 @@ export default function ChildrenPage() {
                     'w-full text-left rounded-xl border p-3 transition-all',
                     selectedId === child.child_id
                       ? 'border-primary/50 bg-primary/5'
-                      : 'border-border bg-glass hover:bg-glass-hover'
+                      : 'border-border bg-glass hover:bg-glass-hover',
                   )}
                 >
                   <div className="flex items-center justify-between">
@@ -177,45 +270,117 @@ export default function ChildrenPage() {
           </DataLoader>
         </div>
 
-        {/* Right: timeline */}
-        <div className="lg:col-span-2">
+        {/* Center: event stream */}
+        <div className="lg:col-span-2 space-y-3">
           {selectedId ? (
-            <div className="space-y-3">
-              {/* View mode toggle */}
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">
-                  {timelineLoading ? 'Loading...' : `${timelineEvents.length} events`}
-                </span>
-                <div className="flex gap-1 bg-glass rounded-lg p-0.5 border border-border-light">
-                  <button
-                    onClick={() => setViewMode('compact')}
-                    className={cn(
-                      'p-1.5 rounded-md transition-all',
-                      viewMode === 'compact' ? 'bg-glass-hover text-foreground' : 'text-muted-foreground hover:text-foreground',
+            <>
+              {/* Child Header */}
+              <GlassCard>
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-lg">
+                      {selectedChild?.gender === 'Male' ? '👦' : selectedChild?.gender === 'Female' ? '👧' : '🧒'}
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold text-foreground">{childName}</h2>
+                      <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                        <span>#{selectedChild?.child_id}</span>
+                        <span>Age {selectedChild?.age ?? '?'}</span>
+                        <span>{selectedChild?.location}</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <EmergencyBadge level={stats?.emergency_level || selectedChild?.emergency_level || 'normal'} />
+                        {stats?.placement?.status === 'active' && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-success/10 text-success rounded-full border border-success/30">
+                            Placement Active
+                          </span>
+                        )}
+                        {selectedChild?.special_needs && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded-full border border-blue-500/30">
+                            Special Needs
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-right text-xs text-muted-foreground space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-3 h-3" />
+                      <span className="tabular-nums">{stats?.total_events ?? 0} events</span>
+                    </div>
+                    {stats?.last_activity && (
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-3 h-3" />
+                        <span>
+                          {(() => {
+                            const mins = Math.floor((Date.now() - new Date(stats.last_activity!).getTime()) / 60000)
+                            return mins < 1 ? 'Just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`
+                          })()}
+                        </span>
+                      </div>
                     )}
-                    aria-label="Compact view"
-                  >
-                    <List className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setViewMode('detailed')}
-                    className={cn(
-                      'p-1.5 rounded-md transition-all',
-                      viewMode === 'detailed' ? 'bg-glass-hover text-foreground' : 'text-muted-foreground hover:text-foreground',
-                    )}
-                    aria-label="Detailed view"
-                  >
-                    <LayoutGrid className="w-3.5 h-3.5" />
-                  </button>
+                  </div>
                 </div>
+
+                {/* Quick Add row */}
+                <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border-light">
+                  <Button
+                    size="sm"
+                    onClick={() => setShowAddModal(true)}
+                    className="shrink-0"
+                  >
+                    <Plus className="w-4 h-4 mr-1" />
+                    Add Event
+                  </Button>
+                  <div className="flex gap-1 overflow-x-auto">
+                    {QUICK_ADD_TYPES.map(qa => {
+                      const IconComp = qa.icon
+                      return (
+                        <button
+                          key={qa.type}
+                          onClick={() => quickAddMutation.mutate({ event_type: qa.type })}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-border-light text-[10px] text-muted-foreground hover:text-foreground hover:border-border transition-all whitespace-nowrap"
+                        >
+                          <IconComp className={cn('w-3 h-3', qa.color)} />
+                          {qa.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </GlassCard>
+
+              {/* Category filter */}
+              <div className="flex items-center gap-1.5">
+                {CATEGORY_FILTERS.map(f => (
+                  <button
+                    key={f.key}
+                    onClick={() => setFilterCategory(f.key)}
+                    className={cn(
+                      'px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all',
+                      filterCategory === f.key
+                        ? 'bg-primary/10 text-primary border-primary/30'
+                        : 'text-muted-foreground border-border-light hover:text-foreground',
+                    )}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+                <span className="text-[10px] text-muted-foreground/60 ml-auto tabular-nums">
+                  {filteredEvents.length} events
+                </span>
               </div>
-              <ChildLifeTimeline
-                childId={selectedId}
-                events={timelineEvents}
-                viewMode={viewMode}
-                onEventClick={handleEventClick}
-              />
-            </div>
+
+              {/* Live Timeline Feed */}
+              <GlassCard className="overflow-hidden">
+                <div ref={timelineRef} className="max-h-[600px] overflow-y-auto px-4 py-2">
+                  <ChildLifeTimeline
+                    childId={selectedId}
+                    events={filteredEvents}
+                  />
+                </div>
+              </GlassCard>
+            </>
           ) : (
             <GlassCard>
               <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -224,13 +389,120 @@ export default function ChildrenPage() {
                   Select a child
                 </h3>
                 <p className="text-sm text-muted-foreground">
-                  Choose a child from the list to view their life timeline
+                  Choose a child from the list to view their live event stream
                 </p>
               </div>
             </GlassCard>
           )}
         </div>
+
+        {/* Right: stats panel */}
+        <div className="lg:col-span-1 space-y-3">
+          {stats && (
+            <>
+              <GlassCard>
+                <GlassCardHeader>
+                  <Activity className="w-4 h-4 text-primary" />
+                  <GlassCardTitle>Statistics</GlassCardTitle>
+                </GlassCardHeader>
+                <div className="px-3 pb-3 space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-muted-foreground">Events this month</span>
+                    <span className="text-foreground font-medium tabular-nums">{stats.total_events}</span>
+                  </div>
+                  {Object.entries(stats.by_type || {}).slice(0, 5).map(([type, count]) => {
+                    const theme = QUICK_ADD_TYPES.find(q => q.type === type)
+                    const IconComp = theme?.icon || Activity
+                    return (
+                      <div key={type} className="flex justify-between text-xs">
+                        <span className="flex items-center gap-1.5 text-muted-foreground">
+                          <IconComp className={cn('w-3 h-3', theme?.color)} />
+                          {type.charAt(0).toUpperCase() + type.slice(1)}
+                        </span>
+                        <span className="text-foreground font-medium tabular-nums">{count}</span>
+                      </div>
+                    )
+                  })}
+                  {Object.entries(stats.by_severity || {}).length > 0 && (
+                    <>
+                      <div className="border-t border-border-light pt-2 mt-2" />
+                      {Object.entries(stats.by_severity).map(([sev, count]) => {
+                        const SevIcon = SEVERITY_ICONS[sev] || Shield
+                        const colorMap: Record<string, string> = {
+                          low: 'text-muted-foreground',
+                          medium: 'text-warning',
+                          high: 'text-destructive',
+                          critical: 'text-critical',
+                        }
+                        return (
+                          <div key={sev} className="flex justify-between text-xs">
+                            <span className="flex items-center gap-1.5 text-muted-foreground">
+                              <SevIcon className={cn('w-3 h-3', colorMap[sev] || '')} />
+                              {sev.charAt(0).toUpperCase() + sev.slice(1)}
+                            </span>
+                            <span className="text-foreground font-medium tabular-nums">{count}</span>
+                          </div>
+                        )
+                      })}
+                    </>
+                  )}
+                </div>
+              </GlassCard>
+
+              {stats.placement?.status && (
+                <GlassCard>
+                  <GlassCardHeader>
+                    <Home className="w-4 h-4 text-primary" />
+                    <GlassCardTitle>Placement</GlassCardTitle>
+                  </GlassCardHeader>
+                  <div className="px-3 pb-3 space-y-1.5 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Status</span>
+                      <span className={cn(
+                        'font-medium',
+                        stats.placement.status === 'active' ? 'text-success' : 'text-muted-foreground',
+                      )}>
+                        {stats.placement.status}
+                      </span>
+                    </div>
+                    {stats.placement.family_id && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Family</span>
+                        <span className="text-foreground font-medium">{stats.placement.family_id}</span>
+                      </div>
+                    )}
+                    {stats.placement.since && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Since</span>
+                        <span className="text-foreground font-medium">
+                          {new Date(stats.placement.since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </GlassCard>
+              )}
+
+              <GlassCard>
+                <GlassCardHeader>
+                  <Calendar className="w-4 h-4 text-primary" />
+                  <GlassCardTitle>Upcoming</GlassCardTitle>
+                </GlassCardHeader>
+                <div className="px-3 pb-3">
+                  <p className="text-xs text-muted-foreground">No upcoming events scheduled.</p>
+                </div>
+              </GlassCard>
+            </>
+          )}
+        </div>
       </div>
+
+      {/* Add Event Modal */}
+      <AddEventModal
+        open={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        onSave={handleSaveEvent}
+      />
     </motion.div>
   )
 }
