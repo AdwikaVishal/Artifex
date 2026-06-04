@@ -1,5 +1,7 @@
 export type StageStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 
+export type StagePayload = Record<string, unknown>
+
 export interface TimelineEvent {
   id: string
   stage: string
@@ -15,6 +17,7 @@ export interface TimelineEvent {
   startedAt?: string
   completedAt?: string
   details?: string
+  payload?: StagePayload
   inputData?: string
   outputData?: string
   decisionExplanation?: string

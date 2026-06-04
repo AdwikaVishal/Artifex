@@ -1,10 +1,11 @@
-import { useAgentStatuses, useHealth, useDashboardMetrics, useWorkflowActivity } from '@/hooks/use-foster'
+import { useAgentStatuses, useHealth, useDashboardMetrics, useWorkflowActivity, useMonitoringSummary } from '@/hooks/use-foster'
 import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glass-card'
 import { StatusBadge } from '@/components/ui/badge'
 import { DataLoader } from '@/components/data-loader'
 import { motion } from 'framer-motion'
 import {
-  Activity, Database, Bot, Radio, Network, BarChart3, RefreshCw, 
+  Activity, Database, Bot, Radio, Network, BarChart3, RefreshCw,
+  Gauge, Timer, CheckCircle2, XCircle, Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -12,26 +13,20 @@ import {
 } from 'recharts'
 import { useQueryClient } from '@tanstack/react-query'
 
-function ServiceCard({ name, icon: Icon, status, latency }: { name: string; icon: React.ElementType; status: string; latency?: number }) {
+function MetricCard({ icon: Icon, label, value, sublabel, color }: {
+  icon: React.ElementType; label: string; value: string | number; sublabel?: string; color?: string
+}) {
   return (
     <GlassCard hover>
       <div className="flex items-center gap-3">
-        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-          status === 'healthy' || status === 'connected' ? 'bg-success/15' :
-          status === 'degraded' ? 'bg-warning/15' : 'bg-destructive/15'
-        }`}>
-          <Icon size={20} className={
-            status === 'healthy' || status === 'connected' ? 'text-success' :
-            status === 'degraded' ? 'text-warning' : 'text-destructive'
-          } />
+        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${color || 'bg-primary/15'}`}>
+          <Icon size={20} className={color ? '' : 'text-primary'} />
         </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-foreground">{name}</p>
-          {latency !== undefined && (
-            <p className="text-xs text-muted-foreground font-mono">{latency}ms latency</p>
-          )}
+        <div>
+          <p className="text-2xl font-bold font-mono text-foreground">{value}</p>
+          <p className="text-xs text-muted-foreground">{label}</p>
+          {sublabel && <p className="text-[10px] text-muted-foreground mt-0.5">{sublabel}</p>}
         </div>
-        <StatusBadge status={status} />
       </div>
     </GlassCard>
   )
@@ -42,6 +37,7 @@ export default function MonitoringPage() {
   const { data: health, isLoading: healthLoading, error: healthError, refetch: refetchHealth } = useHealth()
   const { data: metrics } = useDashboardMetrics()
   const { data: activity } = useWorkflowActivity()
+  const { data: summary } = useMonitoringSummary()
   const queryClient = useQueryClient()
   const agents = agentMap?.agents ? Object.values(agentMap.agents) : []
 
@@ -49,6 +45,7 @@ export default function MonitoringPage() {
     refetchAgents()
     refetchHealth()
     queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    queryClient.invalidateQueries({ queryKey: ['monitoring'] })
   }
 
   // Build latency chart data from health check
@@ -63,12 +60,14 @@ export default function MonitoringPage() {
     ? activity.map(a => ({ name: a.name, events: a.submitted + a.matched + a.approved }))
     : [{ name: 'No data', events: 0 }]
 
+  const sm = summary?.metrics
+
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">System Monitoring</h1>
-          <p className="text-sm text-muted-foreground mt-1">Real-time infrastructure and agent monitoring</p>
+          <p className="text-sm text-muted-foreground mt-1">Real-time infrastructure and agent observability</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
@@ -76,11 +75,34 @@ export default function MonitoringPage() {
             <span className="text-xs text-muted-foreground">{health?.status === 'ok' ? 'All Systems' : 'Degraded'}</span>
           </div>
           <span className="text-muted">|</span>
-          <span className="text-xs text-muted-foreground font-mono">{metrics?.active_workflows ?? 0} active workflows</span>
+          <span className="text-xs text-muted-foreground font-mono">{sm?.active_workflows ?? metrics?.active_workflows ?? 0} active workflows</span>
           <Button variant="ghost" size="sm" onClick={handleRefresh}>
             <RefreshCw size={14} />
           </Button>
         </div>
+      </div>
+
+      {/* Pipeline observability metrics */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+        <MetricCard icon={Bot} label="Active Agents"
+          value={Object.values(summary?.agents ?? {}).filter((a: any) => a.status === 'healthy').length}
+          sublabel={`${Object.keys(summary?.agents ?? {}).length} total registered`}
+          color="bg-primary/15" />
+        <MetricCard icon={Gauge} label="Running Pipelines" value={sm?.running_pipelines ?? 0}
+          sublabel={`${sm?.total_executions ?? 0} total executions`}
+          color="bg-info/15" />
+        <MetricCard icon={CheckCircle2} label="Success Rate" value={`${sm?.success_rate ?? 100}%`}
+          sublabel={`${sm?.failure_count ?? 0} failures`}
+          color="bg-success/15" />
+        <MetricCard icon={Timer} label="Avg Latency" value={`${sm?.average_latency_ms ?? 0}ms`}
+          sublabel="per agent execution"
+          color="bg-secondary/15" />
+        <MetricCard icon={Zap} label="Pipeline Completion" value={`${sm?.pipeline_completion_rate ?? 0}%`}
+          sublabel="terminal stage reached"
+          color="bg-accent/15" />
+        <MetricCard icon={XCircle} label="Failures" value={sm?.failure_count ?? 0}
+          sublabel="total failed events"
+          color="bg-destructive/15" />
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -139,7 +161,7 @@ export default function MonitoringPage() {
               <StatusBadge status={agents.length > 0 && agents.every((a: any) => a.status === 'healthy') ? 'healthy' : 'degraded'} />
             </div>
           </div>
-          <p className="text-xs text-muted-foreground font-mono">{agents.filter((a: any) => a.status === 'healthy').length ?? 0}/{agents.length ?? 0} active</p>
+          <p className="text-xs text-muted-foreground font-mono">{agents.filter((a: any) => a.status === 'healthy').length}/{agents.length} active</p>
         </GlassCard>
       </div>
 
@@ -198,9 +220,12 @@ export default function MonitoringPage() {
       <GlassCard>
         <GlassCardHeader>
           <GlassCardTitle>AI Agent Status</GlassCardTitle>
-          <Button variant="ghost" size="sm" onClick={handleRefresh}>
-            <RefreshCw size={14} />
-          </Button>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground font-mono">{sm?.total_executions ?? 0} total executions</span>
+            <Button variant="ghost" size="sm" onClick={handleRefresh}>
+              <RefreshCw size={14} />
+            </Button>
+          </div>
         </GlassCardHeader>
         <DataLoader isLoading={agentsLoading} error={agentsError} type="table" rows={3}>
           <div className="overflow-x-auto">

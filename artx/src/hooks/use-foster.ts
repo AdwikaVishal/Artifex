@@ -24,6 +24,12 @@ import {
   getFairnessMetrics,
   getShapExplanation,
   getChildTimeline,
+  getMonitoringSummary,
+  getReasoningTraces,
+  getAgentExecutions,
+  type MonitoringSummary,
+  type ReasoningTrace,
+  type AgentExecution,
 } from '@/services/foster'
 import type { ReferralSubmission, ApproveRequest, FamilyCreate, FamilyUpdate } from '@/types'
 
@@ -343,5 +349,37 @@ export function useChildTimeline(childId: string | null) {
     enabled: !!childId,
     staleTime: 1000 * 60 * 2, // 2 minutes
     retry: 1,
+  })
+}
+
+// ── Monitoring Summary hook ───────────────────────────────────────────────
+
+export function useMonitoringSummary() {
+  return useQuery({
+    queryKey: ['monitoring', 'summary'],
+    queryFn: getMonitoringSummary,
+    refetchInterval: 15000,
+  })
+}
+
+// ── Reasoning Traces hook ─────────────────────────────────────────────────
+
+export function useReasoningTraces(workflowId: string | null, stage?: string) {
+  return useQuery({
+    queryKey: ['reasoning-traces', workflowId, stage],
+    queryFn: () => getReasoningTraces(workflowId!, stage),
+    enabled: !!workflowId,
+    refetchInterval: 5000,
+    staleTime: 2000,
+  })
+}
+
+// ── Agent Executions hook ─────────────────────────────────────────────────
+
+export function useAgentExecutions(workflowId?: string) {
+  return useQuery({
+    queryKey: ['agent-executions', workflowId],
+    queryFn: () => getAgentExecutions(workflowId),
+    refetchInterval: 10000,
   })
 }

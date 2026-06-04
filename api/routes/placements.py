@@ -141,7 +141,11 @@ async def receive_ml_inference_log(req: MlInferenceLogRequest) -> dict[str, str]
 
 @router.get("/api/pending_approvals")
 async def get_pending_approvals() -> dict[str, Any]:
-    """Return placements awaiting caseworker approval."""
+    """Return placements awaiting caseworker/supervisor approval.
+
+    Queries pending_approvals table for records in 'pending' status,
+    enriched with child demographics and placement details.
+    """
     approvals: list[dict[str, Any]] = []
     pool = get_pool()
     if pool is not None:
@@ -149,12 +153,17 @@ async def get_pending_approvals() -> dict[str, Any]:
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT p.*, c.age, c.gender,
-                           c.emergency_level AS child_emergency_level
-                    FROM placements p
-                    LEFT JOIN children c ON c.child_id = p.child_id
-                    WHERE p.status IN ('pending', 'pending_supervisor')
-                    ORDER BY p.created_at DESC
+                    SELECT pa.workflow_id, pa.child_id, pa.risk_score,
+                           pa.status AS approval_status, pa.created_at,
+                           c.age, c.gender,
+                           COALESCE(c.emergency_level, 'normal') AS child_emergency_level,
+                           p.status AS placement_status,
+                           p.family_json
+                    FROM pending_approvals pa
+                    LEFT JOIN children c ON c.child_id = pa.child_id
+                    LEFT JOIN placements p ON p.workflow_id = pa.workflow_id
+                    WHERE pa.status = 'pending'
+                    ORDER BY pa.created_at DESC
                     """
                 )
                 for row in rows:
@@ -167,18 +176,16 @@ async def get_pending_approvals() -> dict[str, Any]:
                         "child_id":           row["child_id"],
                         "recommended_family": family.get("name") or family.get("family_id"),
                         "risk_score":         float(row.get("risk_score") or 0),
-                        "status":             row["status"],
-                        "emergency_level":    (
-                            row.get("child_emergency_level")
-                            or row.get("emergency_level", "normal")
-                        ),
+                        "status":             row.get("approval_status", "pending"),
+                        "emergency_level":    row.get("child_emergency_level", "normal"),
                         "created_at": (
                             row.get("created_at").isoformat()
                             if row.get("created_at") else None
                         ),
                     })
+                logger.info("approval_query_result", count=len(approvals))
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("api.get_pending_approvals.error", exc_info=True)
     return {"approvals": approvals, "count": len(approvals)}
 
 
@@ -234,6 +241,7 @@ async def approve_placement(
         }
 
     new_status = "approved" if approval.approved else "rejected"
+    stage_name = "placement_approved" if approval.approved else "placement_rejected"
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE placements SET status = $2, notes = $3 WHERE workflow_id = $1",
@@ -241,6 +249,18 @@ async def approve_placement(
         )
         await conn.execute(
             "UPDATE active_placements SET status = $2 WHERE workflow_id = $1",
+            approval.workflow_id, new_status,
+        )
+        # Mark supervisor_approval as completed so buildStagesFromTimeline
+        # no longer treats it as the current active stage.
+        await conn.execute(
+            "UPDATE workflow_events SET status = 'completed' "
+            "WHERE workflow_id = $1 AND stage = 'supervisor_approval' AND status = 'in_progress'",
+            approval.workflow_id,
+        )
+        # Resolve the pending approval
+        await conn.execute(
+            "UPDATE pending_approvals SET status = $2 WHERE workflow_id = $1",
             approval.workflow_id, new_status,
         )
         # Update workflow_status so dashboard reflects the change immediately
@@ -252,7 +272,7 @@ async def approve_placement(
             "  progress = EXCLUDED.progress, updated_at = NOW()",
             approval.workflow_id,
             new_status,
-            "placement_approved" if approval.approved else "placement_rejected",
+            stage_name,
             100 if approval.approved else 0,
         )
         if approval.approved:
@@ -277,7 +297,7 @@ async def approve_placement(
     try:
         await store_workflow_event(
             approval.workflow_id,
-            stage="placement_approved" if approval.approved else "placement_rejected",
+            stage=stage_name,
             status="approved" if approval.approved else "rejected",
             data={
                 "approved": approval.approved,
@@ -322,6 +342,7 @@ async def supervisor_approve(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     new_status = "approved" if approval.approved else "rejected"
+    stage_name = "placement_approved" if approval.approved else "placement_rejected"
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE placements SET status = $2, notes = $3 WHERE workflow_id = $1",
@@ -330,6 +351,29 @@ async def supervisor_approve(
         await conn.execute(
             "UPDATE active_placements SET status = $2 WHERE workflow_id = $1",
             approval.workflow_id, new_status,
+        )
+        # Mark supervisor_approval as completed
+        await conn.execute(
+            "UPDATE workflow_events SET status = 'completed' "
+            "WHERE workflow_id = $1 AND stage = 'supervisor_approval' AND status = 'in_progress'",
+            approval.workflow_id,
+        )
+        # Resolve the pending approval
+        await conn.execute(
+            "UPDATE pending_approvals SET status = $2 WHERE workflow_id = $1",
+            approval.workflow_id, new_status,
+        )
+        # Update workflow_status so dashboard reflects the change immediately
+        await conn.execute(
+            "INSERT INTO workflow_status (workflow_id, status, current_stage, progress, updated_at) "
+            "VALUES ($1, $2, $3, $4, NOW()) "
+            "ON CONFLICT (workflow_id) DO UPDATE SET "
+            "  status = EXCLUDED.status, current_stage = EXCLUDED.current_stage, "
+            "  progress = EXCLUDED.progress, updated_at = NOW()",
+            approval.workflow_id,
+            new_status,
+            stage_name,
+            100 if approval.approved else 0,
         )
         if approval.approved:
             placement = await conn.fetchrow(
@@ -352,7 +396,7 @@ async def supervisor_approve(
     try:
         await store_workflow_event(
             approval.workflow_id,
-            stage="placement_approved" if approval.approved else "placement_rejected",
+            stage=stage_name,
             status="approved" if approval.approved else "rejected",
             data={
                 "approved": approval.approved,

@@ -344,12 +344,12 @@ async def get_child_timeline(
 
     # Significant workflow events (completed stages only, skip noise)
     _significant_stages = {
-        "intake",
-        "eligibility_validation",
-        "ml_inference",
-        "placement_matching",
+        "referral_submitted",
+        "eligibility_validated",
+        "risk_assessment",
+        "family_matching",
         "recommendation_generated",
-        "approval_pending",
+        "supervisor_approval",
         "placement_approved",
         "placement_rejected",
     }

@@ -49,8 +49,9 @@ def run_alembic_upgrade() -> None:
     Run ``alembic upgrade head`` synchronously at startup.
 
     Uses subprocess so we don't need to import Alembic's internals into the
-    async event loop.  Exits the process on failure so Kubernetes / Docker
-    restarts the container rather than serving requests against a stale schema.
+    async event loop.  Logs errors instead of crashing so the application can
+    still start and serve health-check / diagnostic endpoints even when the
+    schema is in a degraded state.
     """
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     alembic_ini = os.path.join(repo_root, "alembic.ini")
@@ -74,7 +75,11 @@ def run_alembic_upgrade() -> None:
             result.stdout,
             result.stderr,
         )
-        sys.exit(1)
+        _process_logger.warning(
+            "Continuing despite migration failure – some tables may be out of date. "
+            "Run `alembic upgrade head` manually after diagnosing the issue."
+        )
+        return
     _process_logger.info("alembic upgrade head OK:\n%s", result.stdout or "(no output)")
 
 
@@ -95,14 +100,15 @@ async def store_placement(placement: dict) -> None:
             INSERT INTO placements
                 (workflow_id, child_id, family_id, family_json,
                  risk_score, risk_explanation, match_explanation, last_notes, status, updated_at)
-            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, NOW())
+            VALUES ($1, $2, COALESCE($3, 'unassigned'), COALESCE($4::jsonb, '{}'::jsonb),
+                    $5, $6, $7, $8, $9, NOW())
             ON CONFLICT (workflow_id) DO UPDATE SET
-                family_id         = EXCLUDED.family_id,
+                family_id         = CASE WHEN $3 IS NOT NULL THEN $3 ELSE placements.family_id END,
                 risk_score        = EXCLUDED.risk_score,
                 risk_explanation  = EXCLUDED.risk_explanation,
                 match_explanation = COALESCE(EXCLUDED.match_explanation, placements.match_explanation),
                 last_notes        = EXCLUDED.last_notes,
-                family_json       = EXCLUDED.family_json,
+                family_json       = CASE WHEN $4 IS NOT NULL THEN $4::jsonb ELSE placements.family_json END,
                 status            = EXCLUDED.status,
                 updated_at        = NOW()
             """,
@@ -127,6 +133,18 @@ async def store_workflow_event(
         return
     safe_data = data or {}
     async with _db_pool.acquire() as conn:
+        # ── If the workflow already reached a terminal state, auto-promote
+        #    any in_progress event to completed and don't downgrade
+        #    workflow_status.  This prevents a race between the background
+        #    pipeline and a user's approval action.
+        current_wf_status = await conn.fetchval(
+            "SELECT status FROM workflow_status WHERE workflow_id = $1",
+            workflow_id,
+        )
+        if current_wf_status in ("approved", "rejected", "closed"):
+            if status == "in_progress":
+                status = "completed"
+
         await conn.execute(
             "INSERT INTO workflow_events (workflow_id, stage, status, data) "
             "VALUES ($1, $2, $3, $4::jsonb)",
@@ -139,12 +157,32 @@ async def store_workflow_event(
             "  (workflow_id, status, current_stage, progress, metadata, updated_at) "
             "VALUES ($1,$2,$3,$4,$5::jsonb,NOW()) "
             "ON CONFLICT (workflow_id) DO UPDATE SET "
-            "  status=EXCLUDED.status, current_stage=EXCLUDED.current_stage, "
-            "  progress=EXCLUDED.progress, "
+            "  status=CASE WHEN workflow_status.status IN ('approved','rejected','closed') "
+            "             THEN workflow_status.status ELSE EXCLUDED.status END, "
+            "  current_stage=CASE WHEN workflow_status.status IN ('approved','rejected','closed') "
+            "                    THEN workflow_status.current_stage ELSE EXCLUDED.current_stage END, "
+            "  progress=CASE WHEN workflow_status.status IN ('approved','rejected','closed') "
+            "               THEN workflow_status.progress ELSE EXCLUDED.progress END, "
             "  metadata=COALESCE(EXCLUDED.metadata, workflow_status.metadata), "
             "  updated_at=NOW()",
             workflow_id, status, stage, progress, json.dumps(safe_data),
         )
+
+        # Persist reasoning trace to DB if provided
+        reasoning_steps = safe_data.get("reasoning", [])
+        if reasoning_steps and isinstance(reasoning_steps, list):
+            for i, step in enumerate(reasoning_steps):
+                agent_name = safe_data.get("agent", stage)
+                try:
+                    await conn.execute(
+                        "INSERT INTO reasoning_traces "
+                        "  (workflow_id, stage, agent_name, step_index, content, timestamp) "
+                        "VALUES ($1, $2, $3, $4, $5, NOW()) "
+                        "ON CONFLICT DO NOTHING",
+                        workflow_id, stage, agent_name, i, str(step),
+                    )
+                except Exception:
+                    pass
 
         timeline = await get_workflow_timeline(workflow_id, limit=200)
         await broadcast_workflow_event(
@@ -157,7 +195,23 @@ async def store_workflow_event(
                 "progress": progress,
                 "timestamp": timestamp,
                 "current_stage": stage,
-                "payload": safe_data,
+                "payload": {
+                    **safe_data,
+                    "agent": safe_data.get("agent", stage),
+                    "action": safe_data.get("action", ""),
+                    "output": safe_data.get("output", ""),
+                    "confidence": safe_data.get("confidence"),
+                    "confidence_score": safe_data.get("confidence_score"),
+                    "latency": safe_data.get("latency", 0),
+                    "reasoning": reasoning_steps,
+                    "input": safe_data.get("input", ""),
+                    "inputData": safe_data.get("inputData", ""),
+                    "outputData": safe_data.get("outputData", ""),
+                    "decisionExplanation": safe_data.get("decisionExplanation", ""),
+                    "logs": safe_data.get("logs", []),
+                    "message": safe_data.get("message", safe_data.get("details", "")),
+                    "details": safe_data.get("details", ""),
+                },
                 "timeline": timeline,
             },
         )
@@ -416,7 +470,7 @@ async def add_pending_approval(
         return
     try:
         async with _db_pool.acquire() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 """
                 INSERT INTO pending_approvals (workflow_id, child_id, risk_score, status)
                 VALUES ($1, $2, $3, 'pending')
@@ -424,6 +478,8 @@ async def add_pending_approval(
                 """,
                 workflow_id, child_id, risk_score,
             )
+            if result and "INSERT 0 1" in result:
+                logger.info("approval_created", workflow_id=workflow_id, child_id=child_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("api.add_pending_approval.error", error=str(exc))
 
@@ -443,6 +499,113 @@ async def get_pending_approvals_db() -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("api.get_pending_approvals_db.error", error=str(exc))
         return []
+
+
+async def backfill_missing_placements() -> int:
+    """Create placements rows for workflows stuck without one."""
+    if _db_pool is None:
+        return 0
+    count = 0
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (we.workflow_id) we.workflow_id
+                FROM workflow_events we
+                LEFT JOIN placements p ON p.workflow_id = we.workflow_id
+                WHERE p.workflow_id IS NULL
+                ORDER BY we.workflow_id, we.timestamp DESC
+                """
+            )
+            for row in rows:
+                wfid = row["workflow_id"]
+                await conn.execute(
+                    """
+                    INSERT INTO placements (workflow_id, child_id, status, risk_score, family_id, family_json)
+                    SELECT $1,
+                           COALESCE(
+                               (SELECT data->>'child_id' FROM workflow_events
+                                WHERE workflow_id = $1 AND data->>'child_id' IS NOT NULL
+                                ORDER BY timestamp DESC LIMIT 1),
+                               'unknown'
+                           ),
+                           'pending', 0.0, 'unassigned', '{}'::jsonb
+                    ON CONFLICT (workflow_id) DO NOTHING
+                    """,
+                    wfid,
+                )
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM active_placements WHERE workflow_id = $1", wfid
+                )
+                if not exists:
+                    cid = await conn.fetchval(
+                        """SELECT data->>'child_id' FROM workflow_events
+                           WHERE workflow_id = $1 AND data->>'child_id' IS NOT NULL
+                           ORDER BY timestamp DESC LIMIT 1""",
+                        wfid,
+                    )
+                    await conn.execute(
+                        "INSERT INTO active_placements "
+                        "  (workflow_id, child_id, family_id, status) "
+                        "VALUES ($1, $2, 'unassigned', 'pending_review')",
+                        wfid, cid or 'unknown',
+                    )
+                count += 1
+            if count:
+                logger.info("placement_backfill", backfilled=count)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.backfill_missing_placements.error", error=str(exc))
+    return count
+
+
+async def backfill_missing_approvals() -> int:
+    """Find workflows stuck at supervisor_approval without a pending_approvals record."""
+    if _db_pool is None:
+        return 0
+    count = 0
+    try:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (we.workflow_id) we.workflow_id
+                FROM workflow_events we
+                LEFT JOIN pending_approvals pa ON pa.workflow_id = we.workflow_id
+                WHERE we.stage IN ('supervisor_approval', 'approval_pending')
+                  AND we.status = 'in_progress'
+                  AND pa.workflow_id IS NULL
+                ORDER BY we.workflow_id, we.timestamp DESC
+                """
+            )
+            for row in rows:
+                wfid = row["workflow_id"]
+                await conn.execute(
+                    """
+                    INSERT INTO pending_approvals (workflow_id, child_id, risk_score, status)
+                    SELECT $1,
+                           COALESCE(p.child_id, ap.child_id, we.child_id, 'unknown'),
+                           COALESCE(p.risk_score, 0.0),
+                           'pending'
+                    FROM (SELECT $1 AS wfid) dummy
+                    LEFT JOIN placements p ON p.workflow_id = dummy.wfid
+                    LEFT JOIN active_placements ap ON ap.workflow_id = dummy.wfid
+                    LEFT JOIN (
+                        SELECT workflow_id,
+                               data->>'child_id' AS child_id
+                        FROM workflow_events
+                        WHERE workflow_id = dummy.wfid
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    ) we ON TRUE
+                    ON CONFLICT (workflow_id) DO NOTHING
+                    """,
+                    wfid,
+                )
+                count += 1
+            if count:
+                logger.info("approval_backfill", backfilled=count)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.backfill_missing_approvals.error", error=str(exc))
+    return count
 
 
 async def resolve_pending_approval(workflow_id: str, new_status: str) -> None:
@@ -517,3 +680,134 @@ async def log_action(
                     )
     except Exception as exc:  # noqa: BLE001
         logger.warning("api.audit_log.error", action=action, error=str(exc))
+
+
+# ── Agent execution helpers ─────────────────────────────────────────────────────
+
+
+async def store_agent_execution(
+    workflow_id: str,
+    stage: str,
+    agent_name: str,
+    *,
+    action: str | None = None,
+    output: str | None = None,
+    confidence: float | None = None,
+    latency_seconds: float | None = None,
+    status: str = "completed",
+    details: dict | None = None,
+) -> None:
+    """Persist an agent execution record for monitoring/observability."""
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_executions "
+                "  (workflow_id, stage, agent_name, action, output, confidence, "
+                "   latency_seconds, status, details, completed_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())",
+                workflow_id, stage, agent_name, action, output, confidence,
+                latency_seconds, status, json.dumps(details) if details else None,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.store_agent_execution.error", error=str(exc))
+
+
+async def get_reasoning_traces(
+    workflow_id: str,
+    stage: str | None = None,
+) -> list[dict]:
+    """Retrieve reasoning traces for a workflow, optionally filtered by stage."""
+    if _db_pool is None:
+        return []
+    try:
+        async with _db_pool.acquire() as conn:
+            if stage:
+                rows = await conn.fetch(
+                    "SELECT id, workflow_id, stage, agent_name, step_index, content, timestamp "
+                    "FROM reasoning_traces "
+                    "WHERE workflow_id = $1 AND stage = $2 "
+                    "ORDER BY step_index ASC",
+                    workflow_id, stage,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT id, workflow_id, stage, agent_name, step_index, content, timestamp "
+                    "FROM reasoning_traces "
+                    "WHERE workflow_id = $1 "
+                    "ORDER BY timestamp ASC",
+                    workflow_id,
+                )
+        return [dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.get_reasoning_traces.error", error=str(exc))
+        return []
+
+
+async def get_agent_executions(
+    workflow_id: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Retrieve agent execution records, optionally filtered by workflow."""
+    if _db_pool is None:
+        return []
+    try:
+        async with _db_pool.acquire() as conn:
+            if workflow_id:
+                rows = await conn.fetch(
+                    "SELECT id, workflow_id, stage, agent_name, action, output, "
+                    "       confidence, latency_seconds, status, details, "
+                    "       started_at, completed_at "
+                    "FROM agent_executions WHERE workflow_id = $1 "
+                    "ORDER BY started_at DESC LIMIT $2",
+                    workflow_id, limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT id, workflow_id, stage, agent_name, action, output, "
+                    "       confidence, latency_seconds, status, details, "
+                    "       started_at, completed_at "
+                    "FROM agent_executions "
+                    "ORDER BY started_at DESC LIMIT $1",
+                    limit,
+                )
+        return [dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.get_agent_executions.error", error=str(exc))
+        return []
+
+
+# ── User authentication helpers (PostgreSQL-backed) ────────────────────────────
+
+
+async def get_user_by_email(email: str) -> dict | None:
+    """Look up a user by email in the users table."""
+    if _db_pool is None:
+        return None
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, email, password_hash, role, display_name, is_active, "
+                "       created_at, last_login_at "
+                "FROM users WHERE email = $1 AND is_active = TRUE",
+                email,
+            )
+        return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.get_user_by_email.error", error=str(exc))
+        return None
+
+
+async def update_last_login(email: str) -> None:
+    """Update the last_login_at timestamp for a user."""
+    if _db_pool is None:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET last_login_at = NOW() WHERE email = $1",
+                email,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("api.update_last_login.error", error=str(exc))

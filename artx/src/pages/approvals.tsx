@@ -91,10 +91,10 @@ export default function ApprovalsPage() {
                         <div>
                           <span className="text-xs text-muted-foreground block">Risk Score</span>
                           <span className={`font-mono font-medium ${
-                            (approval?.risk_score ?? 0) >= 7 ? 'text-destructive' :
-                            (approval?.risk_score ?? 0) >= 4 ? 'text-warning' : 'text-success'
+                            (approval?.risk_score ?? 0) >= 70 ? 'text-destructive' :
+                            (approval?.risk_score ?? 0) >= 40 ? 'text-warning' : 'text-success'
                           }`}>
-                            {approval?.risk_score ?? '—'}/10
+                            {approval?.risk_score != null ? `${Math.round(approval.risk_score)}/100` : '—'}
                           </span>
                         </div>
                         <div className="col-span-2">

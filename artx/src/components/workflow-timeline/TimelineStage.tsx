@@ -59,6 +59,84 @@ function formatTimestamp(ts?: string): string {
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 }
 
+function toPercent(v: unknown): string | null {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN
+  if (isNaN(n)) return null
+  const pct = n <= 1 ? Math.round(n * 100) : Math.round(n)
+  return `${pct}%`
+}
+
+function ScoreCard({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div className="flex flex-col items-center p-2.5 rounded-lg border border-glass-border bg-surface-alt">
+      <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</span>
+      <span className={`text-lg font-bold font-mono ${color}`}>{value}</span>
+    </div>
+  )
+}
+
+function PayloadView({ payload }: { payload: Record<string, unknown> }) {
+  const entries = Object.entries(payload).filter(
+    ([k]) => !['agent', 'progress', 'timestamp', 'action', 'output', 'input', 'latency', 'reasoning', 'logs', 'inputData', 'outputData', 'confidence', 'confidence_score', 'match_score', 'matchScore', 'risk_score', 'riskScore'].includes(k),
+  )
+
+  const matchScore = toPercent(payload.match_score ?? payload.matchScore ?? payload.match)
+  const confidenceScore = toPercent(payload.confidence_score ?? payload.confidenceScore ?? payload.confidence)
+  const riskScore = toPercent(payload.risk_score ?? payload.riskScore ?? payload.risk)
+  const explanation = payload.decisionExplanation ?? payload.explanation ?? ''
+  const family = payload.recommended_family ?? payload.family_name ?? payload.family ?? ''
+  const familyId = payload.family_id ?? payload.familyId ?? ''
+
+  return (
+    <div className="space-y-3">
+      {/* Recommended family */}
+      {family && (
+        <div className="p-3 rounded-lg border border-glass-border bg-surface-alt">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">Recommended Family</p>
+          <p className="text-sm font-medium text-foreground">
+            {String(family)}
+            {familyId && <span className="text-muted-foreground ml-1 text-xs">({String(familyId)})</span>}
+          </p>
+        </div>
+      )}
+
+      {/* Scores grid */}
+      {(matchScore || confidenceScore || riskScore) && (
+        <div className="grid grid-cols-3 gap-2">
+          {matchScore && <ScoreCard label="Match" value={matchScore} color="text-info" />}
+          {confidenceScore && <ScoreCard label="Confidence" value={confidenceScore} color="text-success" />}
+          {riskScore && <ScoreCard label="Risk" value={riskScore} color={parseInt(riskScore) >= 70 ? 'text-destructive' : parseInt(riskScore) >= 40 ? 'text-warning' : 'text-success'} />}
+        </div>
+      )}
+
+      {/* Decision explanation */}
+      {explanation && (
+        <div>
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">Decision Summary</p>
+          <p className="text-xs text-muted-foreground bg-surface-alt p-2.5 rounded-lg border border-border leading-relaxed">
+            {String(explanation)}
+          </p>
+        </div>
+      )}
+
+      {/* Remaining payload fields */}
+      {entries.length > 0 && (
+        <div>
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1.5">Details</p>
+          <div className="space-y-1">
+            {entries.map(([k, v]) => (
+              <div key={k} className="flex justify-between text-xs text-muted-foreground bg-surface-alt px-2.5 py-1.5 rounded border border-border">
+                <span className="font-medium">{k.replace(/_/g, ' ')}</span>
+                <span className="font-mono">{v != null ? String(v) : '—'}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function TimelineStage({ event, index, total, isLast, isSelected, onClick, isReplay }: TimelineStageProps) {
   const [expanded, setExpanded] = useState(false)
   const Icon = STATUS_ICONS[event.status]
@@ -66,7 +144,7 @@ export default function TimelineStage({ event, index, total, isLast, isSelected,
   const isCompleted = event.status === 'completed'
   const isFailed = event.status === 'failed'
 
-  const hasDetails = event.reasoning.length > 0 || event.details || event.logs
+  const hasDetails = event.reasoning.length > 0 || event.details || event.logs || event.payload || event.decisionExplanation
 
   return (
     <motion.div
@@ -245,6 +323,13 @@ export default function TimelineStage({ event, index, total, isLast, isSelected,
                 className="border-t border-glass-border"
               >
                 <div className="p-3.5 space-y-3">
+
+                  {/* ── Structured payload (scores, family, explanation) ── */}
+                  {event.payload && (
+                    <PayloadView payload={event.payload} />
+                  )}
+
+                  {/* ── Reasoning entries ── */}
                   {event.reasoning.length > 0 && (
                     <div>
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1.5">Reasoning</p>
@@ -259,14 +344,8 @@ export default function TimelineStage({ event, index, total, isLast, isSelected,
                     </div>
                   )}
 
-                  {event.details && (
-                    <div>
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">Details</p>
-                      <p className="text-xs text-muted-foreground">{event.details}</p>
-                    </div>
-                  )}
-
-                  {event.decisionExplanation && (
+                  {/* ── Decision explanation (only if not already shown in payload) ── */}
+                  {event.decisionExplanation && !event.payload?.decisionExplanation && (
                     <div>
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">Decision Explanation</p>
                       <p className="text-xs text-muted-foreground bg-surface-alt p-2 rounded-lg border border-border">
@@ -275,6 +354,15 @@ export default function TimelineStage({ event, index, total, isLast, isSelected,
                     </div>
                   )}
 
+                  {/* ── Event.agentOutput as fallback details ── */}
+                  {event.details && !event.payload && (
+                    <div>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">Details</p>
+                      <p className="text-xs text-muted-foreground">{event.details}</p>
+                    </div>
+                  )}
+
+                  {/* ── Logs ── */}
                   {event.logs && event.logs.length > 0 && (
                     <div>
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1">Logs</p>

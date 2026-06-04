@@ -73,6 +73,65 @@ class BaseAgent(ABC):
         self._nats: NATSManager = NATSManager(self.nats_url)
         self._log = logger.bind(agent=name)
         self._running = False
+        # Execution tracking for latency measurement
+        self._execution_start: float | None = None
+
+    def start_execution(self, task_id: str = "") -> None:
+        """Call at the beginning of an agent task to start the timer."""
+        self._execution_start = time.perf_counter()
+        self._log.debug("execution.started", task_id=task_id)
+
+    def end_execution(self, task_id: str = "") -> float:
+        """
+        Call at the end of an agent task to get elapsed seconds.
+        Returns the elapsed time in seconds (0 if no timer was started).
+        Publishes a timing event to NATS for observability.
+        """
+        if self._execution_start is None:
+            return 0.0
+        elapsed = time.perf_counter() - self._execution_start
+        self._execution_start = None
+        self._log.debug("execution.completed", task_id=task_id, latency_s=round(elapsed, 3))
+        # Publish execution metric to NATS for monitoring
+        asyncio.ensure_future(self._publish_execution_metric(task_id, elapsed))
+        return elapsed
+
+    async def _publish_execution_metric(self, task_id: str, elapsed: float) -> None:
+        """Publish execution timing to the agent's metrics subject."""
+        try:
+            await self._nats.publish(
+                f"agent.{self.name}.timing",
+                {
+                    "agent": self.name,
+                    "task_id": task_id,
+                    "latency_seconds": round(elapsed, 4),
+                    "timestamp": time.time(),
+                },
+            )
+        except Exception:
+            pass
+
+    async def publish_reasoning(self, workflow_id: str, stage: str, step: str) -> None:
+        """
+        Publish a reasoning trace step for a workflow stage.
+        These are consumed by the WebSocket log broadcaster and displayed
+        in the frontend's AI Thoughts tab.
+        """
+        try:
+            import datetime as _dt
+            await self._nats.publish(
+                f"workflow.{workflow_id}.reasoning",
+                {
+                    "type": "reasoning_step",
+                    "workflow_id": workflow_id,
+                    "stage": stage,
+                    "agent": self.name,
+                    "content": step,
+                    "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                },
+            )
+        except Exception:
+            pass
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 

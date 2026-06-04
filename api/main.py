@@ -302,6 +302,18 @@ async def lifespan(app: FastAPI):
     # Seed demo families if the table is empty
     await _seed_demo_families()
 
+    # Backfill placements & approval records for stuck workflows
+    try:
+        from api.db import backfill_missing_placements as _bp, backfill_missing_approvals as _ba
+        pf = await _bp()
+        if pf:
+            logger.info("api.startup.backfilled_placements", count=pf)
+        af = await _ba()
+        if af:
+            logger.info("api.startup.backfilled_approvals", count=af)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("api.startup.backfill_error", error=str(_e))
+
     # Share in-process state with route modules
     from .routes.placements import set_placement_store
     from .routes.dashboard import set_heartbeat_store
@@ -761,9 +773,9 @@ async def get_foster_status(workflow_id: str) -> dict[str, Any]:
                 recommended_family = rec
         else:
             recommended_family = rec
-        match_score = prediction.get("score") or None
-        confidence_score = prediction.get("confidence") or None
-        risk_score = prediction.get("risk_score") or None
+        match_score = prediction.get("score")
+        confidence_score = prediction.get("confidence")
+        risk_score = prediction.get("risk_score")
         feature_importance = prediction.get("feature_importance") or None
         top_matches = prediction.get("top_matches") or None
 
@@ -818,12 +830,16 @@ async def get_foster_status(workflow_id: str) -> dict[str, Any]:
     if not wf_db or (wf_db.get("status") in ("pending", "running", "in_progress", "in-progress")):
         temporal_status = await _read_temporal_status(workflow_id)
     if isinstance(temporal_status, dict):
-        db_result["match_score"] = db_result["match_score"] or temporal_status.get("match_score")
-        db_result["confidence_score"] = db_result["confidence_score"] or temporal_status.get("confidence_score")
-        db_result["risk_score"] = db_result["risk_score"] or temporal_status.get("risk_score")
-        db_result["current_stage"] = db_result["current_stage"] or temporal_status.get("current_stage")
-        db_result["progress"] = db_result["progress"] or temporal_status.get("progress") or 0
-        db_result["status"] = db_result["status"] or temporal_status.get("status") or db_result["status"]
+        if db_result["match_score"] is None:
+            db_result["match_score"] = temporal_status.get("match_score")
+        if db_result["confidence_score"] is None:
+            db_result["confidence_score"] = temporal_status.get("confidence_score")
+        if db_result["risk_score"] is None:
+            db_result["risk_score"] = temporal_status.get("risk_score")
+        if db_result["current_stage"] is None:
+            db_result["current_stage"] = temporal_status.get("current_stage")
+        if db_result["progress"] is None or db_result["progress"] == 0:
+            db_result["progress"] = temporal_status.get("progress") or 0
         db_result["active"] = temporal_status.get("active", db_result["active"])
 
     # If nothing found at all, return 404
@@ -1039,7 +1055,7 @@ async def login(creds: LoginRequest) -> TokenResponse:
       supervisor@artifex.local / supervisor123
       caseworker@artifex.local / caseworker123
     """
-    user = authenticate_user(creds.email, creds.password)
+    user = await authenticate_user(creds.email, creds.password)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

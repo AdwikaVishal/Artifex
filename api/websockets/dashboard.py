@@ -120,7 +120,11 @@ async def websocket_dashboard(
     if user is None:
         return  # already closed with 1008
 
-    await websocket.accept()
+    try:
+        await websocket.accept()
+    except Exception:
+        return
+
     await _ensure_broadcaster()
     _dashboard_clients.add(websocket)
     logger.info("ws.dashboard.connected", client=str(websocket.client), user=user["user_id"])

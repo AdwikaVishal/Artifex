@@ -1,7 +1,8 @@
 """
 api/auth.py – JWT-based authentication and RBAC for Artifex.
 
-Replaces the insecure X-User-Role / X-User-Id header approach.
+Authentication is PostgreSQL-backed (users table) with an in-memory fallback
+for development environments where the DB may not be fully initialized.
 
 Usage
 ─────
@@ -12,12 +13,6 @@ Usage
       ...
       token = create_access_token(user_id="alice@example.com", role="caseworker")
       return TokenResponse(access_token=token)
-
-  @app.post("/api/referral")
-  async def submit_referral(
-      ...,
-      user: dict = Depends(get_current_user),
-  ): ...
 
   @app.get("/api/audit_logs")
   async def audit_logs(
@@ -57,39 +52,44 @@ JWT_SECRET_KEY: str = os.getenv(
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))  # 8 hours
 
-# Demo users – in production replace with a real user table + bcrypt
-# Format: { "email": ("hashed_password", "role") }
-# Passwords are SHA-256 hashed for demo; use bcrypt in production.
-_DEMO_USERS: dict[str, tuple[str, str]] = {
-    os.getenv("ADMIN_EMAIL", "admin@artifex.local"): (
-        _hash := hashlib.sha256(
-            os.getenv("ADMIN_PASSWORD", "admin123").encode()
-        ).hexdigest(),
-        "admin",
-    ),
-    os.getenv("SUPERVISOR_EMAIL", "supervisor@artifex.local"): (
-        hashlib.sha256(
-            os.getenv("SUPERVISOR_PASSWORD", "supervisor123").encode()
-        ).hexdigest(),
-        "supervisor",
-    ),
-    os.getenv("CASEWORKER_EMAIL", "caseworker@artifex.local"): (
-        hashlib.sha256(
-            os.getenv("CASEWORKER_PASSWORD", "caseworker123").encode()
-        ).hexdigest(),
-        "caseworker",
-    ),
-}
+# In-memory fallback users (used when users table is not yet migrated).
+# Format: { "email": ("sha256_password", "role") }
+_FALLBACK_USERS: dict[str, tuple[str, str]] = {}
+
+
+def _init_fallback_users() -> None:
+    """Populate fallback users from env vars (called once at import time)."""
+    if _FALLBACK_USERS:
+        return
+    users = {
+        os.getenv("ADMIN_EMAIL", "admin@artifex.local"): (
+            hashlib.sha256(
+                os.getenv("ADMIN_PASSWORD", "admin123").encode()
+            ).hexdigest(),
+            "admin",
+        ),
+        os.getenv("SUPERVISOR_EMAIL", "supervisor@artifex.local"): (
+            hashlib.sha256(
+                os.getenv("SUPERVISOR_PASSWORD", "supervisor123").encode()
+            ).hexdigest(),
+            "supervisor",
+        ),
+        os.getenv("CASEWORKER_EMAIL", "caseworker@artifex.local"): (
+            hashlib.sha256(
+                os.getenv("CASEWORKER_PASSWORD", "caseworker123").encode()
+            ).hexdigest(),
+            "caseworker",
+        ),
+    }
+    _FALLBACK_USERS.update(users)
+
+
+_init_fallback_users()
 
 # ── Pure-Python JWT (no external library required) ────────────────────────────
-# We implement HS256 JWT manually to avoid adding python-jose / PyJWT as a
-# hard dependency. The implementation is minimal but correct for HS256.
 
 import base64
 import json as _json
-
-# Fix walrus operator side-effect: _hash is leaked into module scope; clean it up.
-# (The _DEMO_USERS dict is already built correctly above.)
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -279,14 +279,30 @@ async def verify_ws_token(
 
 # ── Login helper ──────────────────────────────────────────────────────────────
 
-def authenticate_user(email: str, password: str) -> dict[str, str] | None:
+async def authenticate_user(email: str, password: str) -> dict[str, str] | None:
     """
-    Validate credentials against the demo user store.
+    Validate credentials against PostgreSQL users table (preferred) or the
+    in-memory fallback store when the DB is not yet available.
 
     Returns {"user_id": email, "role": role} on success, None on failure.
-    In production: query the users table and use bcrypt.checkpw().
+    Production uses the users table (via get_user_by_email); SHA-256 is used
+    for dev parity. Replace with bcrypt in production.
     """
-    entry = _DEMO_USERS.get(email)
+    # 1. Try PostgreSQL first
+    try:
+        from api.db import get_user_by_email as _get_user, update_last_login as _update_login
+        user = await _get_user(email)
+        if user is not None:
+            stored_hash = user.get("password_hash", "")
+            provided_hash = hashlib.sha256(password.encode()).hexdigest()
+            if hmac.compare_digest(stored_hash, provided_hash):
+                await _update_login(email)
+                return {"user_id": email, "role": user["role"]}
+    except Exception:
+        logger.debug("auth.db_lookup_failed_falling_back_to_memory", email=email)
+
+    # 2. Fallback to in-memory demo users
+    entry = _FALLBACK_USERS.get(email)
     if entry is None:
         return None
 

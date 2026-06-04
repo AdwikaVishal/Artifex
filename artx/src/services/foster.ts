@@ -162,58 +162,6 @@ export async function getPlacements(): Promise<Placement[]> {
   return placements
 }
 
-// ── Timeline → WorkflowStage converter ──────────────────────────────────────
-
-const STAGE_NAMES = [
-  'Intake',
-  'Eligibility Validation',
-  'ML Inference',
-  'Placement Matching',
-  'Recommendation Generated',
-  'Approval Pending',
-  'Placement Approved',
-  'Placement Active',
-  'Monitoring',
-]
-
-function buildStagesFromTimeline(
-  timeline: any[],
-  currentStage: string,
-): WorkflowStage[] {
-  return STAGE_NAMES.map((name) => {
-    const events = (timeline || []).filter((e: any) => {
-      const eStage = (e.stage || e.name || '').toLowerCase()
-      return eStage === name.toLowerCase()
-    })
-    const completedEvent = events.find(
-      (e: any) => e.status === 'completed' || e.status === 'active',
-    )
-    const startEvent = events[0]
-    const isCurrent =
-      currentStage &&
-      name.toLowerCase() === currentStage.toLowerCase()
-
-    let status: WorkflowStage['status'] = 'pending'
-    if (completedEvent) {
-      status = 'completed'
-    } else if (isCurrent || events.length > 0) {
-      status = 'in_progress'
-    }
-
-    return {
-      stage: name.toLowerCase().replace(/\s+/g, '_'),
-      name: name.toLowerCase().replace(/\s+/g, '_'),
-      label: name,
-      status,
-      started_at: startEvent?.timestamp || undefined,
-      completed_at: completedEvent?.timestamp || undefined,
-      details: startEvent?.data
-        ? JSON.stringify(startEvent.data).slice(0, 120)
-        : undefined,
-    }
-  })
-}
-
 export async function getWorkflowStatus(workflowId: string): Promise<WorkflowStatus> {
   const raw = workflowId
   const normalized = normalizeWorkflowId(workflowId)
@@ -241,7 +189,6 @@ export async function getWorkflowStatus(workflowId: string): Promise<WorkflowSta
     family_id: d.family_id || '',
     status: d.status || 'unknown',
     current_stage: d.current_stage || d.stage || (timeline[0] && (timeline[0].stage || timeline[0].name)) || 'Unknown',
-    stages: buildStagesFromTimeline(timeline, d.current_stage || ''),
     risk_score: d.risk_score ?? null,
     match_score: d.match_score ?? null,
     confidence_score: d.confidence_score ?? null,
@@ -818,5 +765,81 @@ export async function getCaseConferencePdf(
   const res = await api.get<Record<string, unknown>>(
     `/api/twin/${encodeURIComponent(childId)}/case-conference-pdf`,
   )
+  return res.data
+}
+
+// ── Reasoning Traces (AI Thoughts) ──────────────────────────────────────────
+
+export interface ReasoningTrace {
+  id: number
+  workflow_id: string
+  stage: string
+  agent_name: string
+  step_index: number
+  content: string
+  timestamp: string
+}
+
+export async function getReasoningTraces(
+  workflowId: string,
+  stage?: string,
+): Promise<ReasoningTrace[]> {
+  const params: Record<string, string> = {}
+  if (stage) params.stage = stage
+  const res = await api.get<{ traces: ReasoningTrace[] }>(
+    `/api/workflow/${encodeURIComponent(workflowId)}/reasoning`,
+    { params },
+  )
+  return res.data?.traces ?? []
+}
+
+// ── Agent Executions ────────────────────────────────────────────────────────
+
+export interface AgentExecution {
+  id: number
+  workflow_id: string
+  stage: string
+  agent_name: string
+  action: string | null
+  output: string | null
+  confidence: number | null
+  latency_seconds: number | null
+  status: string
+  details: Record<string, unknown> | null
+  started_at: string
+  completed_at: string | null
+}
+
+export async function getAgentExecutions(
+  workflowId?: string,
+): Promise<AgentExecution[]> {
+  if (!workflowId) return []
+  const res = await api.get<{ executions: AgentExecution[] }>(
+    `/api/workflow/${encodeURIComponent(workflowId)}/executions`
+  )
+  return res.data?.executions ?? []
+}
+
+// ── Monitoring Summary ──────────────────────────────────────────────────────
+
+export interface MonitoringSummary {
+  agents: Record<string, {
+    name: string
+    status: string
+    last_heartbeat_age_s: number | null
+  }>
+  metrics: {
+    active_workflows: number
+    running_pipelines: number
+    success_rate: number
+    average_latency_ms: number
+    failure_count: number
+    total_executions: number
+    pipeline_completion_rate: number
+  }
+}
+
+export async function getMonitoringSummary(): Promise<MonitoringSummary> {
+  const res = await api.get<MonitoringSummary>('/api/monitoring/summary')
   return res.data
 }

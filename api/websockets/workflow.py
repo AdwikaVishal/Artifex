@@ -20,6 +20,9 @@ from api.websockets.events import (
 logger = structlog.get_logger()
 router = APIRouter()
 
+PING_INTERVAL_S = 25
+SHUTDOWN_GRACE_S = 5
+
 
 @router.websocket("/workflow/{workflow_id}/stream")
 async def workflow_stream(
@@ -31,14 +34,21 @@ async def workflow_stream(
     Stream live workflow updates for a single workflow_id.
 
     Requires a valid JWT via ?token=<jwt>.
-    Pushes an initial snapshot and then streams real-time workflow events.
+    Pushes an initial snapshot, replays buffered events, then sends
+    application-level pings every 25 s so the ASGI server can detect
+    dropped connections even during idle periods.
     """
     user = await verify_ws_token(token, websocket)
     if user is None:
         return
 
-    await websocket.accept()
-    await register_workflow_client(workflow_id, websocket)
+    try:
+        await websocket.accept()
+        await register_workflow_client(workflow_id, websocket)
+    except Exception:
+        logger.exception("ws.workflow.accept_failed", workflow_id=workflow_id)
+        return
+
     logger.info("ws.workflow.connected", workflow_id=workflow_id,
                 client=str(websocket.client), user=user["user_id"])
     try:
@@ -57,12 +67,7 @@ async def workflow_stream(
 
         try:
             await websocket.send_json(snapshot)
-            logger.info(
-                "workflow_event_sent",
-                workflow_id=workflow_id,
-                stage="snapshot",
-            )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("ws_send_failed", workflow_id=workflow_id, stage="snapshot")
             return
 
@@ -84,21 +89,28 @@ async def workflow_stream(
                 })
                 try:
                     await websocket.send_json(payload)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "ws_send_failed",
                         workflow_id=workflow_id,
                         stage=ev.get("stage", "unknown"),
                     )
                     break
-                await asyncio.sleep(0.15)  # small gap so UI can animate each item
+                await asyncio.sleep(0.15)
 
-        # ── Stay alive and forward live broadcasts ───────────────────────────
+        # ── Stay alive with application-level pings ─────────────────────────
         # Live events are pushed via broadcast_workflow_event() → _workflow_clients
-        # We only need to keep the connection open.
+        # We still send periodic pings so proxy / LB / ASGI server can detect
+        # dropped connections during quiet periods.
         while True:
-            await asyncio.sleep(30)
-    except WebSocketDisconnect:
-        logger.info("ws.workflow.disconnected", workflow_id=workflow_id)
+            await asyncio.sleep(PING_INTERVAL_S)
+            try:
+                await websocket.send_json({"type": "ping"})
+            except Exception:
+                break
+
+    except (WebSocketDisconnect, Exception) as exc:
+        logger.info("ws.workflow.disconnected", workflow_id=workflow_id,
+                    error=type(exc).__name__)
     finally:
         await unregister_workflow_client(workflow_id, websocket)

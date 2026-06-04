@@ -303,3 +303,108 @@ async def get_monitoring() -> dict[str, Any]:
     metrics["healthy_agents"] = healthy_count
 
     return {"agents": agents, "metrics": metrics}
+
+
+# ── Reasoning Traces (AI Thoughts) ─────────────────────────────────────────────
+
+
+@router.get("/api/workflow/{workflow_id}/reasoning")
+async def get_workflow_reasoning(workflow_id: str, stage: str | None = None) -> dict:
+    """Return reasoning traces for a workflow (AI Thoughts for the frontend)."""
+    from api.db import get_reasoning_traces as _get_traces
+    traces = await _get_traces(workflow_id, stage=stage)
+    return {"workflow_id": workflow_id, "traces": traces}
+
+
+@router.get("/api/workflow/{workflow_id}/executions")
+async def get_workflow_executions(workflow_id: str) -> dict:
+    """Return agent execution records for a workflow."""
+    from api.db import get_agent_executions as _get_execs
+    executions = await _get_execs(workflow_id=workflow_id)
+    return {"workflow_id": workflow_id, "executions": executions}
+
+
+@router.get("/api/monitoring/summary")
+async def get_monitoring_summary() -> dict:
+    """
+    Comprehensive monitoring summary for the monitoring dashboard.
+    Returns active agents, running pipelines, success rate, average latency,
+    failure counts, and other observability metrics.
+    """
+    from api.db import get_agent_executions as _get_execs
+    pool = get_pool()
+    result = {
+        "agents": {},
+        "metrics": {
+            "active_workflows": 0,
+            "running_pipelines": 0,
+            "success_rate": 100.0,
+            "average_latency_ms": 0,
+            "failure_count": 0,
+            "total_executions": 0,
+            "pipeline_completion_rate": 0,
+        },
+    }
+
+    # Agent health
+    now = time.time()
+    for name, last_seen in list(_agent_heartbeats.items()):
+        if last_seen is None:
+            status = "unknown"
+        elif now - last_seen < 90:
+            status = "healthy"
+        else:
+            status = "stale"
+        result["agents"][name] = {
+            "name": name,
+            "status": status,
+            "last_heartbeat_age_s": round(now - last_seen, 1) if last_seen else None,
+        }
+
+    # DB metrics
+    if pool:
+        async with pool.acquire() as conn:
+            try:
+                result["metrics"]["active_workflows"] = (
+                    await conn.fetchval(
+                        "SELECT COUNT(*) FROM placements WHERE status IN ('pending','pending_supervisor','approved')"
+                    ) or 0
+                )
+                result["metrics"]["running_pipelines"] = (
+                    await conn.fetchval(
+                        "SELECT COUNT(*) FROM workflow_status WHERE status IN ('running','in_progress')"
+                    ) or 0
+                )
+                result["metrics"]["failure_count"] = (
+                    await conn.fetchval(
+                        "SELECT COUNT(*) FROM workflow_events WHERE status = 'failed'"
+                    ) or 0
+                )
+            except Exception:
+                pass
+
+    # Agent execution stats
+    try:
+        execs = await _get_execs(limit=1000)
+        result["metrics"]["total_executions"] = len(execs)
+        if execs:
+            completed = [e for e in execs if e.get("status") == "completed"]
+            latencies = [e.get("latency_seconds", 0) for e in execs if e.get("latency_seconds") is not None]
+            result["metrics"]["success_rate"] = round(
+                (len(completed) / len(execs)) * 100, 1
+            ) if execs else 100.0
+            result["metrics"]["average_latency_ms"] = round(
+                (sum(latencies) / len(latencies)) * 1000, 1
+            ) if latencies else 0
+            # Pipeline completion rate: ratio of workflows that reached a terminal stage
+            terminal_stages = {"placement_approved", "placement_active", "closed", "completed"}
+            terminal_count = sum(
+                1 for e in execs if e.get("stage", "").lower() in terminal_stages
+            )
+            result["metrics"]["pipeline_completion_rate"] = round(
+                (terminal_count / len(execs)) * 100, 1
+            )
+    except Exception:
+        pass
+
+    return result

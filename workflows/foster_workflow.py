@@ -14,15 +14,15 @@ _retry = RetryPolicy(
 )
 
 STAGES = [
-    "Intake",
-    "Eligibility Validation",
-    "ML Inference",
-    "Placement Matching",
-    "Recommendation Generated",
-    "Approval Pending",
-    "Placement Approved",
-    "Placement Active",
-    "Monitoring",
+    "referral_submitted",
+    "eligibility_validated",
+    "risk_assessment",
+    "family_matching",
+    "recommendation_generated",
+    "supervisor_approval",
+    "placement_approved",
+    "placement_created",
+    "monitoring_active",
 ]
 TOTAL_STAGES = len(STAGES) - 1  # exclude final
 
@@ -111,17 +111,17 @@ class FosterPlacementWorkflow:
             workflow.logger.error(f"foster_workflow.child_not_found child_id={child_id}")
             return {"error": f"Child {child_id} not found in database"}
 
-        # Stage 1 – Intake
-        self._set_stage("Intake", progress=5)
-        await self._record_event("Intake", "completed", {"child_id": child_id})
+        # Stage 1 – Referral Submitted
+        self._set_stage("referral_submitted", progress=5)
+        await self._record_event("referral_submitted", "completed", {"child_id": child_id})
 
-        # Stage 2 – Eligibility Validation
-        self._set_stage("Eligibility Validation", progress=10)
-        await self._record_event("Eligibility Validation", "completed", {"child_id": child_id})
+        # Stage 2 – Eligibility Validated
+        self._set_stage("eligibility_validated", progress=10)
+        await self._record_event("eligibility_validated", "completed", {"child_id": child_id})
 
-        # Stage 3 – ML Inference
-        self._set_stage("ML Inference", progress=25)
-        await self._record_event("ML Inference", "started")
+        # Stage 3 – Risk Assessment
+        self._set_stage("risk_assessment", progress=25)
+        await self._record_event("risk_assessment", "started")
 
         try:
             prediction = await workflow.execute_activity(
@@ -158,14 +158,14 @@ class FosterPlacementWorkflow:
             self._top_matches = prediction.get("top_matches", [])
         else:
             # No fallback recommendations allowed: emit explicit manual-review status.
-            self._set_stage("Placement Matching", progress=40)
+            self._set_stage("family_matching", progress=40)
             match_explanation = "No recommendation could be produced. Manual review required."
             self._matched_family = {}
             self._match_score = 0.0
             self._confidence_score = 0.0
             self._risk_score = 0.0
             await self._record_event(
-                "Placement Matching",
+                "family_matching",
                 "needs_manual_review",
                 {"child_id": child_id},
             )
@@ -177,9 +177,9 @@ class FosterPlacementWorkflow:
         )
 
         # Stage 5 – Recommendation Generated
-        self._set_stage("Recommendation Generated", progress=55)
+        self._set_stage("recommendation_generated", progress=55)
         await self._record_event(
-            "Recommendation Generated",
+            "recommendation_generated",
             "completed",
             {
                 "family_id": self._matched_family.get("family_id"),
@@ -211,34 +211,34 @@ class FosterPlacementWorkflow:
             retry_policy=_retry,
         )
 
-        # Stage 6 – Approval Pending
-        self._set_stage("Approval Pending", progress=70)
+        # Stage 6 – Supervisor Approval
+        self._set_stage("supervisor_approval", progress=70)
         await self._record_event(
-            "Approval Pending",
+            "supervisor_approval",
             "awaiting",
             {"workflow_id": workflow_id},
         )
 
         # Stage 7 – Placement Approved
-        self._set_stage("Placement Approved", progress=85)
+        self._set_stage("placement_approved", progress=85)
         await self._record_event(
-            "Placement Approved",
+            "placement_approved",
             "completed",
             {"family_id": self._matched_family.get("family_id")},
         )
 
-        # Stage 8 – Placement Active
-        self._set_stage("Placement Active", progress=95)
+        # Stage 8 – Placement Created
+        self._set_stage("placement_created", progress=95)
         await self._record_event(
-            "Placement Active",
+            "placement_created",
             "active",
             {"family_id": self._matched_family.get("family_id")},
         )
 
-        # Stage 9 – Monitoring (wait for signals or closure)
-        self._set_stage("Monitoring", progress=100)
+        # Stage 9 – Monitoring Active (wait for signals or closure)
+        self._set_stage("monitoring_active", progress=100)
         await self._record_event(
-            "Monitoring",
+            "monitoring_active",
             "active",
             {},
         )
@@ -265,9 +265,9 @@ class FosterPlacementWorkflow:
             f"foster_workflow.check_in child_id={child_id} score={score}"
         )
 
-        self._set_stage("Check-In Review", progress=85)
+        self._set_stage("check_in", progress=85)
         await self._record_event(
-            "Check-In",
+            "check_in",
             "received",
             {"score": score, "notes": notes[:100]},
         )
@@ -288,7 +288,7 @@ class FosterPlacementWorkflow:
         })
 
         await self._record_event(
-            "Risk Recalculated",
+            "risk_recalculated",
             "completed",
             {"risk_score": new_risk, "explanation": explanation[:100]},
         )
@@ -322,7 +322,7 @@ class FosterPlacementWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=_retry,
             )
-            await self._record_event("Alert Sent", "completed", {"risk_score": self._risk_score})
+            await self._record_event("alert_sent", "completed", {"risk_score": self._risk_score})
 
     @workflow.signal
     async def close_placement(self) -> None:
@@ -330,7 +330,7 @@ class FosterPlacementWorkflow:
             f"foster_workflow.close_requested "
             f"child_id={self._child.get('child_id', 'unknown')}"
         )
-        await self._record_event("Placement Closed", "completed")
+        await self._record_event("placement_closed", "completed")
         self._placement_active = False
 
     @workflow.signal
@@ -359,8 +359,8 @@ class FosterPlacementWorkflow:
             "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
             "notes": "ML signal",
         })
-        self._set_stage("ML Update Received")
-        await self._record_event("ML Update", "completed", prediction)
+        self._set_stage("ml_update")
+        await self._record_event("ml_update", "completed", prediction)
 
     # ── Queries ───────────────────────────────────────────────────────────────
 

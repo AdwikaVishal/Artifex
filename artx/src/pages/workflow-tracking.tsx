@@ -48,36 +48,78 @@ function apiEventsToTimeline(events: WorkflowStage[]): TimelineEvent[] {
   }
 
   const seen = new Map<string, TimelineEvent>()
-  let eventIndex = 0
+
+  const isNewStyleStage = (s: string) => /^[a-z]+(_[a-z]+)*$/.test(s)
 
   for (const e of events || []) {
     const stageName = e.stage || e.name || ''
     if (!stageName) continue
+    // Skip legacy Title Case stages (e.g. "Intake", "Eligibility Validation")
+    if (!isNewStyleStage(stageName)) continue
     const status = STATUS_MAP[e.status] || 'pending'
+
+    // Extract agent metadata from the data.payload field if present
+    const payload = typeof e.data === 'object' && e.data !== null ? e.data : {}
+    const agentName = (payload as any).agent || ''
+    const agentAction = (payload as any).action || ''
+    const agentOutput = (payload as any).output || ''
+    const latency = typeof (payload as any).latency === 'number' ? (payload as any).latency : 0
+    const confidenceScoreVal = (payload as any).confidence_score
+      ?? ((payload as any).confidence != null
+        ? (payload as any).confidence <= 1
+          ? Math.round((payload as any).confidence * 100)
+          : Math.round((payload as any).confidence)
+        : 0)
+    const reasoning = Array.isArray((payload as any).reasoning) ? (payload as any).reasoning : []
+    const inputData = (payload as any).inputData || (payload as any).input || ''
+    const outputData = (payload as any).outputData || ''
+    const decisionExplanation = (payload as any).decisionExplanation || ''
+    const logs = Array.isArray((payload as any).logs) ? (payload as any).logs : []
+    const detailsStr = e.details || (
+      typeof e.data === 'object' && e.data !== null
+        ? ((e.data as any).message || (e.data as any).details || '')
+        : typeof e.data === 'string' ? e.data : undefined
+    )
+    const stagePayload: Record<string, unknown> | undefined =
+      typeof e.data === 'object' && e.data !== null && Object.keys(e.data).length > 0
+        ? (e.data as Record<string, unknown>)
+        : undefined
+
     const existing = seen.get(stageName)
     const rank = STATUS_RANK[status] ?? 0
     const existingRank = existing ? (STATUS_RANK[existing.status] ?? 0) : -1
+
+    // Always update if new status is higher rank (e.g., completed > pending)
     if (!existing || rank > existingRank) {
       const raw = e.label || e.stage?.replace(/_/g, ' ') || e.name?.replace(/_/g, ' ') || stageName
       const label = raw.charAt(0).toUpperCase() + raw.slice(1)
       seen.set(stageName, {
-        id: `api-${stageName}-${eventIndex++}`,
+        id: `api-${stageName}`,
         stage: stageName, label, status,
-        agentName: '', agentAction: '', agentOutput: '',
-        latency: 0, confidenceScore: 0, reasoning: [],
+        agentName, agentAction, agentOutput,
+        latency, confidenceScore: confidenceScoreVal,
+        reasoning,
+        inputData, outputData, decisionExplanation, logs,
         timestamp: e.timestamp || e.started_at,
         startedAt: e.started_at, completedAt: e.completed_at,
-        details: e.details || (e.data && typeof e.data === 'object'
-          ? (typeof e.data.message === 'string' ? e.data.message
-            : typeof e.data.details === 'string' ? e.data.details
-            : JSON.stringify(e.data))
-          : typeof e.data === 'string' ? e.data : undefined),
+        details: detailsStr,
+        payload: stagePayload,
+      })
+    } else if (existing && !existing.agentName && agentName) {
+      // Populate empty agent fields from a later event that has more data
+      seen.set(stageName, {
+        ...existing,
+        agentName: agentName || existing.agentName,
+        agentAction: agentAction || existing.agentAction,
+        agentOutput: agentOutput || existing.agentOutput,
+        latency: latency || existing.latency,
+        confidenceScore: confidenceScoreVal || existing.confidenceScore,
+        reasoning: reasoning.length > 0 ? reasoning : existing.reasoning,
       })
     }
   }
 
-  let idx = 0
-  return Array.from(seen.values()).map((event) => ({ ...event, id: `api-${event.stage}-${idx++}` }))
+  return Array.from(seen.values())
 }
 
 function sortTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
@@ -191,10 +233,13 @@ export default function WorkflowTrackingPage() {
 
     const sub = subscribeWorkflowStream(workflowId,
       (msg) => {
+        // Ignore application-level pings
+        if (msg.type === 'ping') return
+
         // 1. Always update the React Query cache with status metadata
         queryClient.setQueryData(['workflow-status', workflowId], (current) => {
           const existing = (current as WorkflowStatus) || {
-            workflow_id: workflowId, status: 'unknown', active: true, progress: 0, timeline: [], stages: [],
+            workflow_id: workflowId, status: 'unknown', active: true, progress: 0, timeline: [],
           }
           return {
             ...existing, ...msg,
@@ -203,7 +248,6 @@ export default function WorkflowTrackingPage() {
             progress: typeof msg.progress === 'number' ? msg.progress : existing.progress || 0,
             // Don't replace timeline from event messages – we build it incrementally below
             timeline: existing.timeline || [],
-            stages: existing.stages || [],
           } as WorkflowStatus
         })
 
@@ -223,7 +267,10 @@ export default function WorkflowTrackingPage() {
 
         if (msg.type === 'workflow_event' && liveInitialised.current) {
           const stageName = (msg.stage || '').toLowerCase().replace(/\s+/g, '_')
-          const status = msg.status || 'in_progress'
+          const status = (msg.status || 'in_progress') as StageStatus
+          const STATUS_RANK: Record<string, number> = {
+            completed: 4, in_progress: 3, failed: 2, pending: 1,
+          }
           const key = `${stageName}:${status}`
           // Deduplicate: skip if this exact stage+status combo has been seen
           if (seenEventKeys.current.has(key)) return
@@ -236,7 +283,7 @@ export default function WorkflowTrackingPage() {
             id: `live-${stageName}-${status}-${Date.now()}`,
             stage: stageName,
             label,
-            status: status as StageStatus,
+            status,
             agentName: msg.payload?.agent || '',
             agentAction: msg.payload?.action || '',
             agentOutput: msg.payload?.output || '',
@@ -247,15 +294,33 @@ export default function WorkflowTrackingPage() {
                 ? Math.round(msg.payload.confidence_score)
                 : 0,
             reasoning: msg.payload?.reasoning || [],
+            inputData: msg.payload?.inputData || msg.payload?.input || '',
+            outputData: msg.payload?.outputData || '',
+            decisionExplanation: msg.payload?.decisionExplanation || '',
+            logs: msg.payload?.logs || [],
             timestamp: msg.timestamp,
             startedAt: msg.timestamp,
             completedAt: status === 'completed' ? msg.timestamp : undefined,
             details: msg.payload?.message || msg.payload?.details || undefined,
+            payload: msg.payload || undefined,
           }
 
           setLiveEvents((prev) => {
-            const updated = sortTimelineEvents([...prev, newEvent])
-            return updated
+            // Upsert: replace existing entry for same stage if new status rank >= old
+            const newRank = STATUS_RANK[status] ?? 0
+            const idx = prev.findIndex((e) => e.stage === stageName)
+            if (idx >= 0) {
+              const oldRank = STATUS_RANK[prev[idx].status] ?? 0
+              if (newRank >= oldRank) {
+                const updated = [...prev]
+                updated[idx] = newEvent
+                return sortTimelineEvents(updated)
+              }
+              return prev
+            }
+            // No existing entry for this stage — append
+            const updated = [...prev, newEvent]
+            return sortTimelineEvents(updated)
           })
         }
       },
@@ -282,11 +347,29 @@ export default function WorkflowTrackingPage() {
 
   const metrics = useMemo(() => computeMetrics(timelineEvents, elapsed), [timelineEvents, elapsed])
 
+  // Build reasoning entries from both WS events and DB timeline
   const reasoningEntries = useMemo<ReasoningEntry[]>(() => {
-    if (!isReplaying) return []
-    const ratio = replayStep / REPLAY_TOTAL_STEPS
-    return MOCK_REASONING_ENTRIES.slice(0, Math.max(1, Math.floor(ratio * MOCK_REASONING_ENTRIES.length)))
-  }, [isReplaying, replayStep])
+    if (isReplaying) {
+      const ratio = replayStep / REPLAY_TOTAL_STEPS
+      return MOCK_REASONING_ENTRIES.slice(0, Math.max(1, Math.floor(ratio * MOCK_REASONING_ENTRIES.length)))
+    }
+    // Build from live events' reasoning chains
+    const entries: ReasoningEntry[] = []
+    let idCounter = 0
+    for (const ev of timelineEvents) {
+      if (ev.reasoning && ev.reasoning.length > 0) {
+        for (const step of ev.reasoning) {
+          entries.push({
+            id: `reasoning-${idCounter++}`,
+            timestamp: ev.timestamp || ev.startedAt || new Date().toISOString(),
+            agentName: ev.agentName || ev.stage.replace(/_/g, ' '),
+            content: step,
+          })
+        }
+      }
+    }
+    return entries
+  }, [isReplaying, replayStep, timelineEvents])
 
   useEffect(() => {
     if (timelineEvents.length > 0) {
@@ -447,7 +530,7 @@ export default function WorkflowTrackingPage() {
                     <div className="flex items-center gap-2">
                       <ListChecks size={14} className="text-primary" />
                       <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                        Pipeline Stages
+                        Workflow Stages
                       </span>
                     </div>
                     <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
