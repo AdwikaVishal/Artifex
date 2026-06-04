@@ -13,7 +13,7 @@ Endpoints:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any
 
 import structlog
@@ -151,13 +151,13 @@ async def auto_create_child_event(
         return None
     try:
         async with pool.acquire() as conn:
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today = datetime.now(timezone.utc).date()
             row = await conn.fetchrow(
                 """
                 INSERT INTO child_life_events
                     (child_id, event_type, event_date, title, description,
                      severity, created_by, payload)
-                VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8::jsonb)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                 RETURNING *
                 """,
                 child_id, event_type, today, title, description,
@@ -213,13 +213,13 @@ async def get_timeline(
             param_idx += 1
 
         if start_date:
-            conditions.append(f"event_date >= ${param_idx}::date")
-            params.append(start_date)
+            conditions.append(f"event_date >= ${param_idx}")
+            params.append(date.fromisoformat(start_date))
             param_idx += 1
 
         if end_date:
-            conditions.append(f"event_date <= ${param_idx}::date")
-            params.append(end_date)
+            conditions.append(f"event_date <= ${param_idx}")
+            params.append(date.fromisoformat(end_date))
             param_idx += 1
 
         conditions.append("superseded_by IS NULL")
@@ -284,21 +284,29 @@ async def create_event(
         if not child:
             raise HTTPException(status_code=404, detail=f"Child {child_id} not found")
 
+        ev_date = date.fromisoformat(request.event_date) if request.event_date else datetime.now(timezone.utc).date()
+        ev_time = None
+        if request.event_time:
+            try:
+                ev_time = time.fromisoformat(request.event_time)
+            except ValueError:
+                ev_time = None
+
         row = await conn.fetchrow(
             """
             INSERT INTO child_life_events
                 (child_id, event_type, event_date, event_time,
                  title, description, severity, created_by,
                  payload, seal_level, source_table, source_id)
-            VALUES ($1, $2, $3::date, $4::time,
+            VALUES ($1, $2, $3, $4,
                     $5, $6, $7, $8,
                     $9::jsonb, $10, $11, $12)
             RETURNING *
             """,
             child_id,
             request.event_type,
-            request.event_date,
-            request.event_time,
+            ev_date,
+            ev_time,
             request.title,
             request.description,
             request.severity,
@@ -342,8 +350,8 @@ async def quick_add_event(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
-    now_time = now.strftime("%H:%M:%S")
+    today = now.date()
+    now_time = now.time()
 
     async with pool.acquire() as conn:
         child = await conn.fetchval("SELECT 1 FROM children WHERE child_id = $1", child_id)
@@ -355,7 +363,7 @@ async def quick_add_event(
             INSERT INTO child_life_events
                 (child_id, event_type, event_date, event_time,
                  title, description, severity, created_by, payload)
-            VALUES ($1, $2, $3::date, $4::time,
+            VALUES ($1, $2, $3, $4,
                     $5, $6, $7, $8, '{}'::jsonb)
             RETURNING *
             """,

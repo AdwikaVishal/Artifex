@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -162,13 +163,13 @@ async def get_ml_audit_decisions(
         idx += 1
 
     if from_date:
-        conditions.append(f"decided_at >= ${idx}::timestamp")
-        params.append(from_date)
+        conditions.append(f"decided_at >= ${idx}")
+        params.append(datetime.fromisoformat(from_date))
         idx += 1
 
     if to_date:
-        conditions.append(f"decided_at <= ${idx}::timestamp")
-        params.append(to_date)
+        conditions.append(f"decided_at <= ${idx}")
+        params.append(datetime.fromisoformat(to_date))
         idx += 1
 
     where_clause = " AND ".join(conditions) if conditions else "TRUE"
@@ -300,12 +301,12 @@ async def export_ml_audit_decisions(
         params.append(decision_type)
         idx += 1
     if from_date:
-        conditions.append(f"decided_at >= ${idx}::timestamp")
-        params.append(from_date)
+        conditions.append(f"decided_at >= ${idx}")
+        params.append(datetime.fromisoformat(from_date))
         idx += 1
     if to_date:
-        conditions.append(f"decided_at <= ${idx}::timestamp")
-        params.append(to_date)
+        conditions.append(f"decided_at <= ${idx}")
+        params.append(datetime.fromisoformat(to_date))
         idx += 1
     if model_version:
         conditions.append(f"model_version = ${idx}")
