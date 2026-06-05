@@ -43,7 +43,7 @@ export function Sidebar() {
 
   const handleLogout = () => {
     logout()
-    navigate('/login', { replace: true })
+    navigate('/', { replace: true })
   }
 
   return (

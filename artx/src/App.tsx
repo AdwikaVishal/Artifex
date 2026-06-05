@@ -12,7 +12,6 @@ import PlacementsPage from '@/pages/placements'
 import FamiliesPage from '@/pages/families'
 import ChatPage from '@/pages/chat'
 import MonitoringPage from '@/pages/monitoring'
-import LoginPage from '@/pages/Login'
 import FairnessPage from '@/pages/fairness'
 import ChildrenPage from '@/pages/children'
 import MlAuditPage from '@/pages/ml-audit'
@@ -37,7 +36,6 @@ export default function App() {
         <ErrorBoundary>
           <BrowserRouter>
             <Routes>
-              <Route path="/login" element={<LoginPage />} />
               <Route element={<DashboardLayout />}>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/referral" element={<ReferralPage />} />

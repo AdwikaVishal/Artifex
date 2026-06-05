@@ -1,6 +1,5 @@
-import { Outlet, Navigate } from 'react-router-dom'
+import { Outlet } from 'react-router-dom'
 import { useHealthCheck } from '@/hooks/use-foster'
-import { useAuth } from '@/contexts/AuthContext'
 import { Sidebar } from '@/components/sidebar'
 import { ToastContainer } from '@/components/ui/toast'
 import { Wifi, WifiOff, Loader2 } from 'lucide-react'
@@ -33,12 +32,7 @@ function ConnectionBar() {
 }
 
 export function DashboardLayout() {
-  const { isAuthenticated } = useAuth()
   const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
-
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />
-  }
 
   return (
     <div className="flex min-h-screen bg-background">

@@ -54,15 +54,11 @@ api.interceptors.response.use(
     if (error.response) {
       const { status, data } = error.response
 
-      // On 401, clear stored credentials and redirect to /login
+      // On 401, clear stored credentials
       if (status === 401) {
         localStorage.removeItem('artifex_token')
         localStorage.removeItem('artifex_user')
         delete api.defaults.headers.common['Authorization']
-        // Only redirect if not already on the login page to avoid loops
-        if (!window.location.pathname.startsWith('/login')) {
-          window.location.href = '/login'
-        }
       }
 
       const detail = data?.detail
