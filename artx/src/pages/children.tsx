@@ -163,7 +163,15 @@ export default function ChildrenPage() {
     description: string
     severity: EventSeverity
   }) => {
-    quickAddMutation.mutate(data)
+    const payload = {
+      ...data,
+      event_type:
+        data.event_type === 'placement_start' ||
+        data.event_type === 'placement_end'
+          ? 'placement'
+          : data.event_type,
+    }
+    quickAddMutation.mutate(payload as QuickAddRequest)
   }, [quickAddMutation])
 
   const filtered = useMemo(() => {

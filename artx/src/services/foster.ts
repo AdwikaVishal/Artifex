@@ -772,7 +772,13 @@ export interface EffectSummary {
     interaction_pct?: number
   }
   robustness_value: number
-  sensitivity: Record<string, unknown>
+  sensitivity: {
+    confounder_strength_to_nullify: number
+    most_sensitive_feature: string
+    most_sensitive_feature_effect: number
+    placebo_test_passed: boolean
+    negative_control_passed: boolean
+  }
 }
 
 export interface SimulateResponse {

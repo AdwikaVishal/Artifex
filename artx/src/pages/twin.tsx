@@ -167,7 +167,7 @@ export default function TwinPage() {
 
   const saveScenarioMutation = useMutation({
     mutationFn: ({ slot, scenario }: { slot: string; scenario: Record<string, unknown> }) =>
-      saveScenario(activeChildId!, slot, scenario),
+      saveScenario(activeChildId!, slot, scenario as any),
   })
 
   const handleLookup = () => {
@@ -431,9 +431,9 @@ export default function TwinPage() {
               <div className="flex items-center gap-2 flex-wrap text-xs text-muted-foreground mt-0.5">
                 <span>Age {String(features.age ?? '—')}</span>
                 <span className="text-muted">·</span>
-                <span>Risk: {features.current_risk_score ?? '—'}%</span>
+                <span>Risk: {Number(features.current_risk_score ?? 0)}%</span>
                 <span className="text-muted">·</span>
-                <span>Stability: {features.stability_score ?? '—'}%</span>
+                <span>Stability: {Number(features.stability_score ?? 0)}%</span>
                 <span className="text-muted">·</span>
                 <span>{features.school ? (features.school as string).split(' ')[0] : 'No school'}</span>
                 <span className="text-muted">·</span>
