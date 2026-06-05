@@ -6,9 +6,9 @@ import { Button } from './ui/button'
 
 interface DataLoaderProps {
   isLoading: boolean
-  error: Error | null
-  children: React.ReactNode
-  type?: 'card' | 'table' | 'chart' | 'full'
+  error?: Error | null
+  children?: React.ReactNode
+  type?: 'card' | 'table' | 'chart' | 'full' | 'inline'
   rows?: number
   refetch?: () => void
 }

@@ -62,7 +62,7 @@ function apiEventsToTimeline(events: WorkflowStage[]): TimelineEvent[] {
     let parsedData: Record<string, unknown> = {}
     if (typeof e.data === 'object' && e.data !== null) {
       parsedData = e.data as Record<string, unknown>
-    } else if (typeof e.data === 'string' && e.data.trim().startsWith('{')) {
+    } else if (typeof e.data === 'string' && (e.data as string).trim().startsWith('{')) {
       try { parsedData = JSON.parse(e.data) } catch { parsedData = {} }
     }
     // Parse e.details (may also be a JSON string or nested message)
@@ -78,12 +78,11 @@ function apiEventsToTimeline(events: WorkflowStage[]): TimelineEvent[] {
     const agentAction = parsedData.action as string || ''
     const agentOutput = parsedData.output as string || ''
     const latency = typeof parsedData.latency === 'number' ? parsedData.latency : 0
-    const confidenceScoreVal = parsedData.confidence_score
-      ?? (parsedData.confidence != null
-        ? parsedData.confidence <= 1
-          ? Math.round(parsedData.confidence * 100)
-          : Math.round(parsedData.confidence)
-        : 0) as number
+    const confidence = Number(parsedData.confidence ?? 0)
+    const confidenceScoreVal = (parsedData.confidence_score
+      ?? (confidence <= 1
+        ? Math.round(confidence * 100)
+        : Math.round(confidence))) as number
     const reasoning = Array.isArray(parsedData.reasoning) ? parsedData.reasoning : []
     const inputData = (parsedData.inputData as string) || (parsedData.input as string) || ''
     const outputData = (parsedData.outputData as string) || ''
