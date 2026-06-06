@@ -113,14 +113,16 @@ async def websocket_logs(
     Requires a valid JWT via ?token=<jwt>.
     Frames: {"agent": "planner", "message": "...", "type": "info|warning|error", "timestamp": "HH:MM:SS"}
     """
-    user = await verify_ws_token(token, websocket)
-    if user is None:
-        return
+    user = None
+    if token:
+        user = await verify_ws_token(token, websocket)
+        if user is None:
+            return
 
     await websocket.accept()
     await _ensure_broadcasters()
     _log_clients.add(websocket)
-    logger.info("ws.logs.connected", client=str(websocket.client), user=user["user_id"])
+    logger.info("ws.logs.connected", client=str(websocket.client), user=user["user_id"] if user else "anonymous")
 
     try:
         while True:
@@ -149,14 +151,16 @@ async def websocket_workflow(
 
     Requires a valid JWT via ?token=<jwt>.
     """
-    user = await verify_ws_token(token, websocket)
-    if user is None:
-        return
+    user = None
+    if token:
+        user = await verify_ws_token(token, websocket)
+        if user is None:
+            return
 
     await websocket.accept()
     await _ensure_broadcasters()
     _workflow_clients.add(websocket)
-    logger.info("ws.workflow.connected", client=str(websocket.client), user=user["user_id"])
+    logger.info("ws.workflow.connected", client=str(websocket.client), user=user["user_id"] if user else "anonymous")
 
     try:
         while True:
@@ -185,14 +189,16 @@ async def websocket_live_events(
 
     Requires a valid JWT via ?token=<jwt>.
     """
-    user = await verify_ws_token(token, websocket)
-    if user is None:
-        return
+    user = None
+    if token:
+        user = await verify_ws_token(token, websocket)
+        if user is None:
+            return
 
     await websocket.accept()
     await _ensure_broadcasters()
     _event_clients.add(websocket)
-    logger.info("ws.live_events.connected", client=str(websocket.client), user=user["user_id"])
+    logger.info("ws.live_events.connected", client=str(websocket.client), user=user["user_id"] if user else "anonymous")
 
     try:
         while True:
