@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from temporalio.client import WorkflowExecutionStatus, WorkflowQueryFailedError, WorkflowQueryRejectedError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
+from temporalio.service import TLSConfig
 
 from nats_client.client import NATSManager
 from .dependencies import get_settings, get_temporal_client
@@ -563,9 +564,12 @@ async def health() -> dict[str, Any]:
         from .dependencies import get_settings as _gs  # noqa: PLC0415
         from temporalio.client import Client as _TClient  # noqa: PLC0415
         settings = _gs()
+        print("HEALTH TEMPORAL_HOST =", settings["temporal_host"])
+        print("HEALTH TEMPORAL_NAMESPACE =", settings["temporal_namespace"])
         client = await _TClient.connect(
             settings["temporal_host"],
             namespace=settings["temporal_namespace"],
+            tls=TLSConfig(),
         )
         await client.service_client.check_health()
         latency_ms = round((_time.monotonic() - t0) * 1000, 1)
