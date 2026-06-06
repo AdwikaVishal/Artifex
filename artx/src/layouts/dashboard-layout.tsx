@@ -31,9 +31,9 @@ function ConnectionBar() {
   )
 }
 
-export function DashboardLayout() {
-  const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+import { API_BASE_URL } from '@/lib/config'
 
+export function DashboardLayout() {
   return (
     <div className="flex min-h-screen bg-background">
       <Sidebar />
@@ -41,7 +41,7 @@ export function DashboardLayout() {
         <ConnectionBar />
         <div className="p-6 lg:p-8 max-w-7xl mx-auto">
           <div className="text-[10px] text-muted-foreground/50 mb-4 font-mono">
-            API: {API_URL}
+            API: {API_BASE_URL}
           </div>
           <Outlet />
         </div>
