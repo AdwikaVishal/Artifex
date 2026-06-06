@@ -25,8 +25,9 @@ async def child_event_ws(
     token: str = Query(default=""),
 ):
     """WebSocket endpoint for real-time child events."""
-    if not await verify_ws_token(token, websocket):
-        return  # verify_ws_token already closed the socket
+    if token:
+        if not await verify_ws_token(token, websocket):
+            return  # verify_ws_token already closed the socket
 
     await websocket.accept()
     await register_child_client(child_id, websocket)
