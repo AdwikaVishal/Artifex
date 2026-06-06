@@ -42,3 +42,6 @@ pytest-cov==6.0.0
 testcontainers==4.8.1
 ruff==0.7.4
 mypy==1.13.0
+alembic
+psycopg2-binary
+sqlalchemy
