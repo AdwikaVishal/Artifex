@@ -31,9 +31,8 @@ st.set_page_config(
 st.title("🚸 Foster Care Swarm – Real-Time Monitoring")
 st.caption("Live placement tracking · Risk scoring · Agent health · Powered by Artifex")
 
-WS_URL   = "ws://localhost:8000/ws/dashboard"
-REST_URL = "http://localhost:8000"
-
+WS_URL = "wss://artifex-production-ba8f.up.railway.app/ws/dashboard"
+REST_URL = "https://artifex-production-ba8f.up.railway.app"
 # ── Shared state (thread-safe) ────────────────────────────────────────────────
 _state: dict[str, Any] = {
     "placements":  [],
