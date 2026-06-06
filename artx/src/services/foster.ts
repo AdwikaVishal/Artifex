@@ -1,4 +1,5 @@
 import api from './api'
+import { WS_BASE_URL } from '@/lib/config'
 import type {
   ReferralSubmission,
   ReferralResponse,
@@ -300,10 +301,8 @@ export function subscribeWorkflowStream(
   onOpen?: () => void,
   onClose?: () => void,
 ): { close: () => void } {
-  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const host = window.location.host
   const token = localStorage.getItem('artifex_token') || ''
-  const url = `${protocol}://${host}/workflow/${encodeURIComponent(workflowId)}/stream?token=${encodeURIComponent(token)}`
+  const url = `${WS_BASE_URL}/workflow/${encodeURIComponent(workflowId)}/stream?token=${encodeURIComponent(token)}`
 
   let ws: WebSocket | null = null
   let shouldClose = false
@@ -480,10 +479,8 @@ export function subscribeChildEventStream(
   onOpen?: () => void,
   onClose?: () => void,
 ): { close: () => void } {
-  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const host = window.location.host
   const token = localStorage.getItem('artifex_token') || ''
-  const url = `${protocol}://${host}/ws/child/${encodeURIComponent(childId)}?token=${encodeURIComponent(token)}`
+  const url = `${WS_BASE_URL}/ws/child/${encodeURIComponent(childId)}?token=${encodeURIComponent(token)}`
 
   let ws: WebSocket | null = null
   let shouldClose = false
