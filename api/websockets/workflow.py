@@ -38,9 +38,11 @@ async def workflow_stream(
     application-level pings every 25 s so the ASGI server can detect
     dropped connections even during idle periods.
     """
-    user = await verify_ws_token(token, websocket)
-    if user is None:
-        return
+    user = None
+    if token:
+        user = await verify_ws_token(token, websocket)
+        if user is None:
+            return
 
     try:
         await websocket.accept()
@@ -50,7 +52,7 @@ async def workflow_stream(
         return
 
     logger.info("ws.workflow.connected", workflow_id=workflow_id,
-                client=str(websocket.client), user=user["user_id"])
+                client=str(websocket.client), user=user["user_id"] if user else "anonymous")
     try:
         wf = await get_workflow_status_db(workflow_id)
         timeline = await get_workflow_timeline(workflow_id, limit=200)
