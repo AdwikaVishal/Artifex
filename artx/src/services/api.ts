@@ -1,8 +1,7 @@
 import axios from 'axios'
+import { API_BASE_URL } from '@/lib/config'
 
-const API_URL = import.meta.env.VITE_API_URL || ''
-
-console.log(`[api] Initializing API client, baseURL: "${API_URL}" (from VITE_API_URL)`)
+console.log(`[api] Initializing API client, baseURL: "${API_BASE_URL}"`)
 
 export class ApiError extends Error {
   status: number | null
@@ -14,7 +13,7 @@ export class ApiError extends Error {
 }
 
 export const api = axios.create({
-  baseURL: API_URL,
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -74,7 +73,7 @@ api.interceptors.response.use(
       console.error(`[api] ❌ Network error for ${url}:`, error.message)
       return Promise.reject(
         new ApiError(
-          `Cannot reach backend at ${API_URL}${url}. Ensure the server is running. (${error.message})`
+          `Cannot reach backend at ${API_BASE_URL}${url}. Ensure the server is running. (${error.message})`
         )
       )
     }
