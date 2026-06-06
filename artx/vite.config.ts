@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+const TARGET = 'https://artifex-production-ba8f.up.railway.app'
+const WS_TARGET = 'wss://artifex-production-ba8f.up.railway.app'
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -13,27 +16,24 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // REST API routes
-      '/api': { target: 'http://localhost:8000', changeOrigin: true },
-      '/foster': { target: 'http://localhost:8000', changeOrigin: true },
-      '/swarm': { target: 'http://localhost:8000', changeOrigin: true },
+      '/api': { target: TARGET, changeOrigin: true },
+      '/foster': { target: TARGET, changeOrigin: true },
+      '/swarm': { target: TARGET, changeOrigin: true },
       '/workflow': {
-        target: 'http://localhost:8000',
+        target: TARGET,
         changeOrigin: true,
-        // WebSocket upgrade for /workflow/{id}/stream
         ws: true,
       },
-      '/emergent': { target: 'http://localhost:8000', changeOrigin: true },
-      '/health': { target: 'http://localhost:8000', changeOrigin: true },
-      '/chat': { target: 'http://localhost:8000', changeOrigin: true },
-      '/events': { target: 'http://localhost:8000', changeOrigin: true },
-      '/agent': { target: 'http://localhost:8000', changeOrigin: true },
-      '/dashboard': { target: 'http://localhost:8000', changeOrigin: true },
-      '/families': { target: 'http://localhost:8000', changeOrigin: true },
-      '/metrics': { target: 'http://localhost:8000', changeOrigin: true },
-      // WebSocket endpoints
+      '/emergent': { target: TARGET, changeOrigin: true },
+      '/health': { target: TARGET, changeOrigin: true },
+      '/chat': { target: TARGET, changeOrigin: true },
+      '/events': { target: TARGET, changeOrigin: true },
+      '/agent': { target: TARGET, changeOrigin: true },
+      '/dashboard': { target: TARGET, changeOrigin: true },
+      '/families': { target: TARGET, changeOrigin: true },
+      '/metrics': { target: TARGET, changeOrigin: true },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: WS_TARGET,
         changeOrigin: true,
         ws: true,
       },
