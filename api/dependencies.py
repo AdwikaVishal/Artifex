@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import AsyncGenerator
 
 from temporalio.client import Client
-
+from temporalio.service import TLSConfig
 from nats_client.client import NATSManager
 
 
@@ -25,9 +25,12 @@ def get_settings() -> dict:
 
 async def get_temporal_client() -> Client:
     settings = get_settings()
+    print("TEMPORAL_HOST =", settings["temporal_host"])
+    print("TEMPORAL_NAMESPACE =", settings["temporal_namespace"])
     return await Client.connect(
         settings["temporal_host"],
         namespace=settings["temporal_namespace"],
+        tls=TLSConfig(),
     )
 
 
