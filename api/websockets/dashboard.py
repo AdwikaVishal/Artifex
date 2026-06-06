@@ -14,7 +14,6 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from api.auth import verify_ws_token
 from api.db import get_all_placements
 from api.websockets.events import serialize_event
 
@@ -112,14 +111,9 @@ async def websocket_dashboard(
     """
     WebSocket endpoint for the live foster care dashboard.
 
-    Requires a valid JWT via ?token=<jwt> query parameter.
     Receives placement updates pushed by the NATS broadcaster.
     Falls back to 2-second DB polling if NATS is unavailable.
     """
-    user = await verify_ws_token(token, websocket)
-    if user is None:
-        return  # already closed with 1008
-
     try:
         await websocket.accept()
     except Exception:
@@ -127,7 +121,7 @@ async def websocket_dashboard(
 
     await _ensure_broadcaster()
     _dashboard_clients.add(websocket)
-    logger.info("ws.dashboard.connected", client=str(websocket.client), user=user["user_id"])
+    logger.info("ws.dashboard.connected", client=str(websocket.client))
 
     # Send an immediate snapshot so the client doesn't wait for the next NATS event
     try:
