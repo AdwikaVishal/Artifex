@@ -414,6 +414,13 @@ async def _seed_demo_families() -> None:
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
+app = FastAPI(
+    title="Artifex Agent Swarm API",
+    description="Production multi-agent system powered by LangGraph + NATS + Temporal",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -1076,3 +1083,11 @@ async def login(creds: LoginRequest) -> TokenResponse:
         role=user["role"],
         user_id=user["user_id"],
     )
+
+
+@app.get("/debug/cors")
+async def debug_cors():
+    return {
+        "middleware": [m.cls.__name__ for m in app.user_middleware],
+        "routes": len(app.routes),
+    }
