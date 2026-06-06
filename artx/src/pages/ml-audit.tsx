@@ -8,6 +8,7 @@ import { GlassCard, GlassCardHeader, GlassCardTitle } from '@/components/ui/glas
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { DataLoader } from '@/components/data-loader'
+import { API_BASE_URL } from '@/lib/config'
 
 interface VerifyResult {
   valid: boolean
@@ -35,10 +36,10 @@ interface Decision {
   hash: string
 }
 
-const API = '/api/ml-audit'
+const API = `${API_BASE_URL}/api/ml-audit`
 
 async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
-  const url = new URL(path, window.location.origin)
+  const url = new URL(path, API_BASE_URL)
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   const res = await fetch(url.toString())
   if (!res.ok) throw new Error(`API error: ${res.status}`)
