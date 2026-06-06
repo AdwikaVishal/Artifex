@@ -11,7 +11,6 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from api.auth import get_current_user
 from api.db import (
     get_pool, is_duplicate_event, log_action, store_workflow_event,
     add_pending_approval,
@@ -59,7 +58,6 @@ async def submit_referral(
     referral: ChildReferral,
     request: Request,
     settings: dict = Depends(get_settings),
-    user: dict = Depends(get_current_user),
 ) -> dict[str, str]:
     """Submit a new child referral from the caseworker intake form."""
     workflow_id = f"foster-{referral.child_id}"
@@ -139,7 +137,7 @@ async def submit_referral(
     _asyncio.create_task(_run_pipeline_simulation(workflow_id, referral))
 
     await log_action(
-        user_id=user["user_id"], role=user["role"],
+        user_id="anonymous", role="public",
         action="SUBMIT_REFERRAL",
         target_type="child", target_id=referral.child_id,
         details={"workflow_id": workflow_id, "emergency_level": referral.emergency_level,
