@@ -28,6 +28,7 @@ async def get_temporal_client() -> Client:
     return await Client.connect(
         settings["temporal_host"],
         namespace=settings["temporal_namespace"],
+        tls=False,
     )
 
 
