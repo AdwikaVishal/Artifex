@@ -217,6 +217,7 @@ function WorkflowActivityChart() {
 }
 
 import { cn } from '@/lib/utils'
+import { WS_BASE_URL } from '@/lib/config'
 
 function MlInsightsPanel() {
   const { data: insights, isLoading, error } = useMlInsights()
@@ -332,9 +333,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const token = localStorage.getItem('artifex_token') || ''
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const host = window.location.host
-    const url = `${protocol}://${host}/ws/dashboard?token=${encodeURIComponent(token)}`
+    const url = `${WS_BASE_URL}/ws/dashboard?token=${encodeURIComponent(token)}`
 
     let ws: WebSocket
     let shouldClose = false
