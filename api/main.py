@@ -566,6 +566,7 @@ async def health() -> dict[str, Any]:
         client = await _TClient.connect(
             settings["temporal_host"],
             namespace=settings["temporal_namespace"],
+            tls=False,
         )
         await client.service_client.check_health()
         latency_ms = round((_time.monotonic() - t0) * 1000, 1)
